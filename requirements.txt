@@ -1,0 +1,17 @@
+# Manhua-Bot (fork / enhanced)
+kurigram
+asyncpg>=0.29.0
+python-dotenv
+beautifulsoup4
+cloudscraper
+requests
+loguru
+aiohttp
+aiofiles
+pypdf
+Pillow
+apscheduler
+reportlab
+httpx
+lxml
+orjson
