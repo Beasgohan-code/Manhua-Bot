@@ -246,3 +246,49 @@ availability.
 `/dl` previously only called `get_manga()`, so **direct download silently
 failed on those 35 sources** (Comick, Asura, Batoto, FlameComics, MangaPark,
 WeebCentral and more) — now fixed.
+
+## RichMessage: tables, headings, columns
+
+`utils.ui.RichMessage` is the shared message builder and now renders real
+tables, headings and multi-column layouts. It delegates to the
+display-width-aware engine in `utils/tgui.py`, so emoji and CJK cells no
+longer break column alignment.
+
+```python
+from utils.ui import RichMessage
+
+msg = (RichMessage("Health Dashboard", "📊")
+       .heading("Runtime", "⚙")
+       .table(["Metric", "Value"],
+              [["Uptime", "3h 12m"], ["Python", "3.11.2"]])
+       .heading("Chapters", "📚")
+       .columns([f"Ch {i}" for i in range(1, 13)], cols=4)
+       .progress(72, "downloading")
+       .field("Quality", "1080p")
+       .tip("Use /audit for details"))
+await m.reply(msg.build())
+```
+
+| Method | Purpose |
+|--------|---------|
+| `.table(headers, rows, align=["l","r","c"])` | bordered table, emoji-safe |
+| `.columns(items, cols=3)` | flat list in aligned columns |
+| `.heading(text, emoji, level)` | section heading |
+| `.progress(pct, label)` | progress bar |
+| `.field(label, value)` | single key/value line |
+| `.divider()` | horizontal rule |
+
+Applied to `/sources`, `/stats`, `/subs`, `/queue`, `/vsources`, `/vengine`
+and `/audit`. Pass `borders=False` for a lightweight variant.
+
+## Verification
+
+`tools/audit.py` (or `/audit`) runs ~1100 automated checks:
+
+- syntax, plugin imports, scraper interfaces, duplicate codes
+- **offline fuzzing**: every source is fed 10 malformed responses
+  (garbage HTML, truncated markup, 403 pages, wrong JSON shapes, nulls)
+  to prove a bad upstream reply cannot crash the aggregated search
+- duplicate commands, callback-prefix shadowing
+- HTML legality/balance/escaping and double-escape detection
+- engine + hanime-plugin availability

@@ -35,14 +35,18 @@ class ComickWebs(Scraper):
         "limit": 24
     }
     data = await self.get(url, params=params, rjson=True, headers=self.headers)
-    if not data:
+    if not isinstance(data, dict):
       return []
-    items = data.get("result", {}).get("items", [])
+    result = data.get("result")
+    items = result.get("items", []) if isinstance(result, dict) else []
     results = []
     for item in items:
+      if not isinstance(item, dict):
+        continue
       manga_id = item.get("manga_id") or item.get("hash_id")
       manga_url = f"https://comix.to/title/{item.get('hash_id', manga_id)}-{item.get('slug', '')}"
-      thumbnail = item.get("poster", {}).get("large", "")
+      poster = item.get("poster")
+      thumbnail = poster.get("large", "") if isinstance(poster, dict) else ""
       results.append({
           "title": item.get("title", ""),
           "url": manga_url,

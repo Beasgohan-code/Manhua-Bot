@@ -523,6 +523,69 @@ def _engine_text() -> str:
     return card.build()
 
 
+@Client.on_callback_query(filters.regex(r"^vsrc_open$"))
+async def vsrc_open_cb(c, q):
+    await q.answer()
+    allow = await user_allows_adult(q.from_user.id)
+    sfw = [s for s in vmgr.srcs.values() if not s.adult]
+    adult = [s for s in vmgr.srcs.values() if s.adult]
+    card = Card("Video Sources", "🎬")
+    card.table(["Anime Source", "Code"], [[s.name, s.sf] for s in sfw])
+    if allow:
+        card.table(["Hentai Source", "Code"], [[s.name, s.sf] for s in adult])
+    else:
+        card.line(f"🔞 <i>{len(adult)} adult sources hidden — /adult on</i>")
+    kb = Keyboard().row(
+        Btn("⚙ Engine", "vengine_cb", style=PRIMARY),
+        Btn("✕ Close", "close", style=DANGER),
+    )
+    await safe_edit(q.message, card.build(), kb.render())
+
+
+@Client.on_callback_query(filters.regex(r"^audit_open$"))
+async def audit_open_cb(c, q):
+    await q.answer()
+    from services.mgr import mgr as _mgr
+    from sources.compat import is_legacy
+    from utils.tgui import backend_report
+
+    modern = sum(1 for s in _mgr.srcs.values() if callable(getattr(s, "get_manga", None)))
+    legacy = sum(1 for s in _mgr.srcs.values() if is_legacy(s))
+    st = vengine.engine_status()
+    ui = backend_report()
+
+    def mk(v):
+        return "✅" if v else "❌"
+
+    card = (
+        Card("Health Check", "🩺")
+        .table(
+            ["Component", "Count", "St"],
+            [
+                ["Manga src", len(_mgr.srcs), mk(modern + legacy == len(_mgr.srcs))],
+                ["  standard", modern, "—"],
+                ["  legacy", legacy, "—"],
+                ["Video src", len(vmgr.srcs), mk(bool(vmgr.srcs))],
+            ],
+        )
+        .table(
+            ["Engine", "St"],
+            [
+                ["yt-dlp", mk(st["yt_dlp"])],
+                ["ffmpeg", mk(st["ffmpeg"])],
+                ["aria2c", mk(st["aria2c"])],
+                ["hanime-plugin", mk(plugin_status()["installed"])],
+                ["aiogram UI", mk(ui["aiogram"])],
+            ],
+        )
+    )
+    kb = Keyboard().row(
+        Btn("⚙ Engine", "vengine_cb", style=PRIMARY),
+        Btn("✕ Close", "close", style=DANGER),
+    )
+    await safe_edit(q.message, card.build(), kb.render())
+
+
 @Client.on_callback_query(filters.regex(r"^(ui_noop|noop_adult)$"))
 async def ui_noop_cb(c, q):
     """Inert target for disabled buttons (MTProto has no `disabled` flag)."""

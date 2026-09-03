@@ -3,6 +3,7 @@ from pyrogram.types import InlineKeyboardMarkup as KM, InlineKeyboardButton as K
 from database.db import db
 from plugins.fsub import force_sub
 from utils.ui import RichMessage, code, bold
+from utils.tgui import Btn, Keyboard, PRIMARY, DANGER, NOOP_CB
 
 @Client.on_message(filters.command(["subs", "subscriptions", "mylist"]))
 @force_sub
@@ -15,18 +16,33 @@ async def subs_cmd(c, m):
             .tip("No series yet. Use /search to track one.")
             .build()
         )
-    msg = RichMessage("Your Subscriptions", "📚").kv([("Count", code(len(subs)))]).line()
-    btns = []
-    for i, s in enumerate(subs[:30], 1):
-        title = s.get("title") or "?"
-        sid = s.get("sid") or "?"
-        last = s.get("last") or "—"
-        msg.line(f"{i}. {bold(title)}")
-        msg.line(f"   sid: {code(sid)} · last: {code(last)}")
+    shown = subs[:30]
+    msg = RichMessage("Your Subscriptions", "📚")
+    msg.table(
+        ["#", "Series", "Last", "SID"],
+        [
+            [
+                i,
+                s.get("title") or "?",
+                s.get("last") or "—",
+                s.get("sid") or "?",
+            ]
+            for i, s in enumerate(shown, 1)
+        ],
+        align=["r", "l", "r", "l"],
+        max_col=20,
+    )
+    if len(subs) > len(shown):
+        msg.tip(f"Showing {len(shown)} of {len(subs)}")
+    msg.tip("Tap a button to unsubscribe · /unsubs SID")
+
+    kbd = Keyboard()
+    for s in shown:
+        sid = s.get("sid")
         if sid and sid != "?":
-            btns.append([KB(f"Unsub {title[:18]}", f"unsub_{sid}")])
-    btns.append([KB("✗ Close", "close")])
-    await m.reply(msg.build(), reply_markup=KM(btns))
+            kbd.row(Btn(f"✕ {(s.get('title') or '?')[:24]}", f"unsub_{sid}", style=DANGER))
+    kbd.row(Btn("✗ Close", "close", style=DANGER))
+    await m.reply(msg.build(), reply_markup=kbd.render())
 
 @Client.on_message(filters.command(["unsubs", "unsub", "unsubscribe"]))
 @force_sub

@@ -25,6 +25,9 @@ class ResetScansWebs(Scraper):
                           data=payload,
                           headers=self.headers)
     results = []
+    if not isinstance(data, dict):
+      # post() returns None when the site errors or rate-limits
+      return results
     if data.get("success") and data.get("data"):
       for item in data["data"]:
         results.append({

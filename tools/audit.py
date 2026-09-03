@@ -162,6 +162,81 @@ def check_video_sources() -> None:
         print(f"{OK} adult gate holds (no adult source in SFW list)")
 
 
+def check_resilience() -> None:
+    """Feed every scraper malformed responses; a live site can return any of
+    these and a raised exception kills the whole aggregated search."""
+    head("Source resilience (offline fuzz)")
+    import asyncio
+
+    from services.mgr import mgr
+    from services.vmgr import vmgr
+    from sources.base import scraper as SC
+
+    try:
+        from loguru import logger as _L
+
+        _L.remove()
+    except Exception:
+        pass
+
+    payloads = [
+        ("garbage html", "<html><body><div class='x'>nope</div></body></html>"),
+        ("truncated", "<html><body><div class="),
+        ("error page", "<html><h1>403 Forbidden</h1></html>"),
+        ("empty json", {}),
+        ("wrong json", {"unexpected": [1, 2, 3]}),
+        ("json list", []),
+        ("json string", "not json at all"),
+        ("list of junk", [1, "x", None]),
+        ("nested nulls", {"result": None, "data": None, "cover": None}),
+        ("null", None),
+    ]
+
+    orig_get, orig_post = SC.Scraper.get, SC.Scraper.post
+    failures = []
+
+    async def run():
+        for label, payload in payloads:
+            async def fg(self, *a, _p=payload, **k):
+                return _p if k.get("rjson") else (_p if isinstance(_p, str) else "")
+
+            SC.Scraper.get = fg
+            SC.Scraper.post = fg
+            for name, src in mgr.srcs.items():
+                try:
+                    r = await asyncio.wait_for(src.search("test"), timeout=8)
+                    if r is not None and not isinstance(r, (list, tuple)):
+                        failures.append(f"{name}.search returned {type(r).__name__} on {label}")
+                except Exception as e:
+                    failures.append(f"{name}.search raised {type(e).__name__} on {label}")
+            for name, src in vmgr.srcs.items():
+                for meth, args in (
+                    ("search", ("t",)), ("get_series", ("x",)),
+                    ("get_episode", ("https://x/y",)),
+                ):
+                    try:
+                        await asyncio.wait_for(getattr(src, meth)(*args), timeout=8)
+                    except Exception as e:
+                        failures.append(
+                            f"{src.sf}.{meth} raised {type(e).__name__} on {label}"
+                        )
+
+    try:
+        asyncio.run(run())
+    finally:
+        SC.Scraper.get, SC.Scraper.post = orig_get, orig_post
+
+    checks = len(payloads) * (len(mgr.srcs) + len(vmgr.srcs) * 3)
+    if failures:
+        problems.extend(failures[:20])
+        print(f"{FAIL} {len(failures)} failure(s) across {checks} checks")
+        for f in failures[:12]:
+            print(f"    {f}")
+    else:
+        print(f"{OK} all {checks} malformed-response checks passed "
+              f"({len(mgr.srcs)} manga + {len(vmgr.srcs)} video sources)")
+
+
 def check_handlers() -> None:
     head("Handler collisions")
     cmds = defaultdict(list)
@@ -275,6 +350,46 @@ def check_ui() -> None:
         print(f"{OK} all rendered buttons carry an action")
 
 
+def check_escaping() -> None:
+    """Catch pre-escaped entities passed into helpers that escape again."""
+    head("Double-escaping")
+    hits = []
+    # tip()/error()/warn()/success()/heading() all run html.escape internally.
+    escaping_calls = re.compile(
+        r"\.(?:tip|success|error|warn)\(\s*[\"'][^\"']*&(?:lt|gt|amp|quot);"
+    )
+    for p in ROOT.rglob("*.py"):
+        if ".venv" in p.parts or "__pycache__" in p.parts:
+            continue
+        src = p.read_text(encoding="utf-8", errors="ignore")
+        for m in escaping_calls.finditer(src):
+            line = src[: m.start()].count("\n") + 1
+            hits.append(f"{p.relative_to(ROOT)}:{line} pre-escaped text into an escaping helper")
+    if hits:
+        problems.extend(hits)
+        print(f"{FAIL} {len(hits)} double-escape risk(s)")
+        for x in hits:
+            print(f"    {x}")
+    else:
+        print(f"{OK} no pre-escaped text passed to escaping helpers")
+
+    # And verify rendered screens carry no broken entities.
+    import config
+
+    config.Config.OWNER_ID = config.Config.OWNER_ID or [1]
+    from utils.ui import START_TEXT, HELP_TEXT
+
+    bad = []
+    for name, t in (("START_TEXT", START_TEXT), ("HELP_TEXT", HELP_TEXT)):
+        if re.search(r"&amp;(?:amp|lt|gt|quot);", t):
+            bad.append(name)
+    if bad:
+        problems.append(f"double-escaped entities in {bad}")
+        print(f"{FAIL} double-escaped entities in {bad}")
+    else:
+        print(f"{OK} rendered screens have clean entities")
+
+
 def check_engine() -> None:
     head("Video engine")
     from services import vengine
@@ -309,7 +424,8 @@ def check_engine() -> None:
 def main() -> int:
     print("\033[1mManhua-Bot health audit\033[0m")
     for fn in (check_compile, check_plugins, check_sources, check_video_sources,
-               check_handlers, check_ui, check_engine):
+               check_resilience, check_handlers, check_ui, check_escaping,
+               check_engine):
         try:
             fn()
         except Exception as e:

@@ -273,6 +273,7 @@ def table(
     rows: Sequence[Sequence[Any]],
     align: Optional[Sequence[str]] = None,
     max_col: int = 18,
+    borders: bool = True,
 ) -> str:
     """Monospaced table with box-drawing borders.
 
@@ -305,12 +306,46 @@ def table(
             _pad(v, widths[i], align[i]) for i, v in enumerate(vals)
         ) + " │"
 
+    if not borders:
+        # Lightweight variant for narrow screens / long lists.
+        def fmt_plain(vals: Sequence[str]) -> str:
+            return " │ ".join(_pad(v, widths[i], align[i]) for i, v in enumerate(vals))
+
+        lines = [
+            fmt_plain([cell(x) for x in headers]),
+            "─┼─".join("─" * w for w in widths),
+        ]
+        lines += [fmt_plain(r) for r in body]
+        return pre("\n".join(lines))
+
     top = "┌─" + "─┬─".join("─" * w for w in widths) + "─┐"
     mid = "├─" + "─┼─".join("─" * w for w in widths) + "─┤"
     bot = "└─" + "─┴─".join("─" * w for w in widths) + "─┘"
     lines = [top, fmt([cell(x) for x in headers]), mid]
     lines += [fmt(r) for r in body]
     lines.append(bot)
+    return pre("\n".join(lines))
+
+
+def columns(items: Sequence[Any], cols: int = 2, gap: int = 2) -> str:
+    """Lay a flat list out in aligned monospaced columns (column-major)."""
+    vals = [str(i) for i in items]
+    if not vals:
+        return ""
+    cols = max(1, cols)
+    import math
+
+    rows_n = math.ceil(len(vals) / cols)
+    grid = [vals[c * rows_n : (c + 1) * rows_n] for c in range(cols)]
+    widths = [max((_dwidth(v) for v in col), default=0) for col in grid]
+    lines = []
+    for r in range(rows_n):
+        parts = [
+            _pad(grid[c][r], widths[c])
+            for c in range(cols)
+            if r < len(grid[c])
+        ]
+        lines.append((" " * gap).join(parts).rstrip())
     return pre("\n".join(lines))
 
 

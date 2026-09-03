@@ -5,6 +5,7 @@ from services.mgr import mgr
 from config import Config
 from plugins.fsub import force_sub
 from utils.ui import RichMessage, code, kb, btn
+from utils.tgui import Btn, Keyboard, PRIMARY, DANGER, SUCCESS
 import time, platform
 
 _bot_start = time.time()
@@ -32,27 +33,65 @@ async def stats_cmd(c, m):
     h, rem = divmod(uptime, 3600)
     mins, secs = divmod(rem, 60)
     me = await c.get_me()
+    # Engine / source breakdown for the dashboard
+    try:
+        from services.vmgr import vmgr
+        from services import vengine
+        from sources.compat import is_legacy
+
+        vsrcs = len(vmgr.srcs)
+        legacy = sum(1 for x in mgr.srcs.values() if is_legacy(x))
+        est = vengine.engine_status()
+    except Exception:
+        vsrcs, legacy, est = 0, 0, {}
+
+    def mk(v):
+        return "✅" if v else "❌"
+
     msg = (
         RichMessage("Health Dashboard", "📊")
-        .tip("Live bot status")
-        .line()
-        .kv([
-            ("Bot", f"@{me.username}"),
-            ("Uptime", code(f"{h}h {mins}m {secs}s")),
-            ("Sources", code(srcs)),
-            ("Users", code(users)),
-            ("Subscriptions", code(subs_n)),
-            ("Banned", code(banned)),
-            ("Python", code(platform.python_version())),
-            ("Engine", code("PostgreSQL")),
-        ])
+        .heading("Runtime", "⚙")
+        .table(
+            ["Metric", "Value"],
+            [
+                ["Bot", f"@{me.username}"],
+                ["Uptime", f"{h}h {mins}m {secs}s"],
+                ["Python", platform.python_version()],
+                ["Database", "PostgreSQL"],
+            ],
+        )
+        .heading("Content", "📚")
+        .table(
+            ["Metric", "Count"],
+            [
+                ["Manga sources", srcs],
+                ["  legacy API", legacy],
+                ["Video sources", vsrcs],
+                ["Users", users],
+                ["Subscriptions", subs_n],
+                ["Banned", banned],
+            ],
+            align=["l", "r"],
+        )
     )
+    if est:
+        msg.heading("Engine", "🎬").table(
+            ["Tool", "St"],
+            [
+                ["yt-dlp", mk(est.get("yt_dlp"))],
+                ["ffmpeg", mk(est.get("ffmpeg"))],
+                ["aria2c", mk(est.get("aria2c"))],
+            ],
+        )
     if is_owner:
         msg.tip("Owner: /webhook /album /poll /adult")
-    await m.reply(
-        msg.build(),
-        reply_markup=KM([[KB("↻ Refresh", "stats_refresh"), KB("✗ Close", "close")]]),
+
+    kbd = Keyboard().row(
+        Btn("↻ Refresh", "stats_refresh", style=PRIMARY),
+        Btn("🩺 Audit", "audit_open", style=SUCCESS),
+        Btn("✗ Close", "close", style=DANGER),
     )
+    await m.reply(msg.build(), reply_markup=kbd.render())
 
 @Client.on_callback_query(filters.regex(r"^stats_refresh$"))
 async def stats_refresh(c, q):

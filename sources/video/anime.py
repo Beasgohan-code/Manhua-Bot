@@ -32,7 +32,7 @@ class AllAnimeWebs(VideoScraper):
         import json
 
         try:
-            return await self.get(
+            data = await self.get(
                 self.api,
                 rjson=True,
                 headers=self.headers,
@@ -41,6 +41,8 @@ class AllAnimeWebs(VideoScraper):
         except Exception as exc:
             logger.debug(f"[allanime] gql: {exc}")
             return None
+        # Cloudflare / error pages come back as HTML, not the GraphQL envelope.
+        return data if isinstance(data, dict) else None
 
     async def search(self, query: str = "") -> List[Dict[str, Any]]:
         gql = """
