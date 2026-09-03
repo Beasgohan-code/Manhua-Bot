@@ -354,86 +354,70 @@ class RichDoc:
 
 
 # ------------------------------------------------------------------ transport
-_rich_bot = None
-_rich_state: Dict[str, Any] = {"checked": False, "ok": False, "reason": ""}
+# The aiogram Bot is owned by services/tgapi (single shared session, probe and
+# circuit breaker); this module only builds payloads.
 
 
 def rich_available() -> Dict[str, Any]:
     """Whether native rich messages can actually be sent from this process."""
-    if _rich_state["checked"]:
-        return dict(_rich_state)
-    _rich_state["checked"] = True
-    try:
-        import aiogram  # noqa: F401
-        from aiogram.methods import SendRichMessage  # noqa: F401
-        from aiogram.types import InputRichMessage  # noqa: F401
-    except Exception as exc:
-        _rich_state["reason"] = f"aiogram missing or too old ({exc})"
-        return dict(_rich_state)
+    from services import tgapi
 
-    try:
-        from config import Config
-
-        token = getattr(Config, "BOT_TOKEN", "") or ""
-    except Exception:
-        token = ""
-    if not token:
-        _rich_state["reason"] = "BOT_TOKEN not configured"
-        return dict(_rich_state)
-
-    _rich_state["ok"] = True
-    _rich_state["reason"] = "ready"
-    return dict(_rich_state)
-
-
-async def _get_bot():
-    global _rich_bot
-    if _rich_bot is not None:
-        return _rich_bot
-    from aiogram import Bot
-    from config import Config
-
-    _rich_bot = Bot(token=Config.BOT_TOKEN)
-    return _rich_bot
+    st = tgapi.status()
+    if not st.get("aiogram"):
+        return {"ok": False, "reason": "aiogram not installed"}
+    if not st.get("configured"):
+        return {"ok": False, "reason": "BOT_TOKEN not configured"}
+    if not st.get("healthy", True):
+        return {"ok": False, "reason": "Bot API unreachable"}
+    return {"ok": True, "reason": st.get("reason") or "ready"}
 
 
 async def send_rich(
     chat_id: int,
-    doc: RichDoc,
+    doc: "RichDoc",
     reply_markup=None,
     fallback_client=None,
+    ephemeral_for: Optional[int] = None,
+    callback_query_id: Optional[str] = None,
     **kwargs,
 ):
     """Send `doc` as a native rich message, falling back to classic HTML.
 
-    `fallback_client` is the Kurigram client used when rich sending is
-    unavailable or fails. Returns the sent message, or None.
+    Returns the sent message, or None when neither path was possible.
     """
-    state = rich_available()
-    if state["ok"]:
+    from services import tgapi
+
+    if tgapi.configured():
         try:
             from aiogram.types import InputRichMessage
 
-            bot = await _get_bot()
-            payload = InputRichMessage(html=doc.html())
-            markup = None
-            if reply_markup is not None:
+            bot = await tgapi.get_bot()
+            if bot is not None:
+                extra = dict(kwargs)
+                if ephemeral_for is not None:
+                    params = tgapi.ephemeral(ephemeral_for, callback_query_id)
+                    if params is not None:
+                        extra["ephemeral_message_parameters"] = params
                 markup = (
                     reply_markup.render_aiogram()
                     if hasattr(reply_markup, "render_aiogram")
                     else reply_markup
                 )
-            return await bot.send_rich_message(
-                chat_id=chat_id, rich_message=payload, reply_markup=markup, **kwargs
-            )
+                msg = await bot.send_rich_message(
+                    chat_id=chat_id,
+                    rich_message=InputRichMessage(html=doc.html()),
+                    reply_markup=markup,
+                    **extra,
+                )
+                tgapi._note_success()
+                return msg
         except Exception as exc:
+            tgapi._note_failure(exc)
             log.warning(f"[RICH] send failed, using classic HTML: {exc}")
 
     if fallback_client is not None:
         markup = (
-            reply_markup.render()
-            if hasattr(reply_markup, "render")
-            else reply_markup
+            reply_markup.render() if hasattr(reply_markup, "render") else reply_markup
         )
         return await fallback_client.send_message(
             chat_id, doc.fallback(), reply_markup=markup
@@ -442,11 +426,7 @@ async def send_rich(
 
 
 async def close_rich():
-    """Release the aiogram session (call on shutdown)."""
-    global _rich_bot
-    if _rich_bot is not None:
-        try:
-            await _rich_bot.session.close()
-        except Exception:
-            pass
-        _rich_bot = None
+    """Release the shared aiogram session (call on shutdown)."""
+    from services import tgapi
+
+    await tgapi.close()

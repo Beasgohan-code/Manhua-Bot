@@ -62,7 +62,14 @@ class AllAnimeWebs(VideoScraper):
         if not data:
             return []
         out = []
-        for show in ((data.get("data") or {}).get("shows") or {}).get("edges") or []:
+        payload = data.get("data")
+        payload = payload if isinstance(payload, dict) else {}
+        shows = payload.get("shows")
+        shows = shows if isinstance(shows, dict) else {}
+        edges = shows.get("edges")
+        for show in (edges if isinstance(edges, list) else []):
+            if not isinstance(show, dict):
+                continue
             sid = show.get("_id")
             if not sid:
                 continue

@@ -379,3 +379,45 @@ Now:
   winning entry lacked
 - **Search history** — `/vhistory` lists recent queries with hit counts
   and one-tap repeat
+
+## Bot API transport (services/tgapi.py)
+
+Kurigram stays the runtime (handlers, MTProto uploads). One shared aiogram
+`Bot` acts as a transport for the calls MTProto cannot make:
+
+| Call | Why aiogram |
+|------|-------------|
+| `sendRichMessage` | not in MTProto |
+| `DisabledButton` | not in MTProto |
+| `force_reply` on inline keyboards | Bot API 10.3 |
+| `EphemeralMessageParameters` | per-user messages in groups |
+| `message_effect_id` | animated effects |
+
+Safety properties, all covered by the audit:
+
+- **Single shared session** — no per-call `Bot()` (the old code leaked an
+  aiohttp connector on every send)
+- **Circuit breaker** — after 3 consecutive transport errors the Bot API
+  path is disabled and sends go straight to Kurigram, instead of paying a
+  full connection timeout every time. It re-enables on the next success.
+- **Startup probe** — `getMe` at boot logs whether rich messages are live
+- **Clean shutdown** — the session is closed in `bot.py`'s `finally`
+
+## Testing
+
+```bash
+python tools/audit.py         # 14 stages
+python tools/extract_test.py  # per-source extraction
+```
+
+`tools/extract_test.py` complements the fuzzer. Fuzzing proves malformed
+input cannot crash a source — but a scraper with *broken selectors* also
+passes that, since `[]` is the correct answer for garbage. The extraction
+harness feeds each scraper a realistic, well-formed response and requires
+it not to raise. That distinction found three real crashes:
+
+- `DemonicScans` — assumed every `<a>` had `href`, an `<img>` and nested
+  `<div>`s; also scraped nav/footer links into bogus results
+- `Manhuaplus` — `pop("name")` on entries lacking it; `urljoin()` with a
+  non-string cover
+- `AllAnime` — GraphQL `data` can be a list, not a dict

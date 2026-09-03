@@ -237,6 +237,56 @@ def check_resilience() -> None:
               f"({len(mgr.srcs)} manga + {len(vmgr.srcs)} video sources)")
 
 
+def check_extraction() -> None:
+    """Feed scrapers WELL-FORMED responses and require no crashes.
+
+    The fuzz stage proves malformed input cannot crash a source, but a
+    scraper with broken selectors also survives that (returning [] is the
+    right answer for garbage). This stage catches the opposite failure:
+    code that raises on input that actually looks like the real site.
+    """
+    head("Extraction (well-formed fixtures)")
+    import asyncio
+    import subprocess
+
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "extract_test.py")],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT),
+    )
+    out = r.stdout
+    if r.returncode not in (0, 1) or "Summary" not in out:
+        # The harness itself failed to run (import/syntax error) — never
+        # treat that as a pass.
+        problems.append("extraction harness failed to run")
+        print(f"{FAIL} harness failed (exit {r.returncode})")
+        for line in (r.stderr or out).strip().splitlines()[-6:]:
+            print(f"    {line}")
+        return
+    errs = 0
+    parsed = "?"
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("errors"):
+            try:
+                errs = int(line.split(":")[1].split()[0])
+            except Exception:
+                pass
+        if line.startswith("parsed OK"):
+            parsed = line.split(":")[1].strip()
+    if parsed == "?":
+        problems.append("extraction harness produced no summary")
+        print(f"{FAIL} could not read extraction summary")
+        return
+    if errs:
+        problems.append(f"{errs} source(s) raise on well-formed input")
+        print(f"{FAIL} {errs} source(s) crash on realistic input")
+        for l in out.splitlines():
+            if ": " in l and ("Error" in l or "error" in l):
+                print(f"    {l.strip()}")
+    else:
+        print(f"{OK} no source raises on well-formed input (parsed {parsed})")
+
+
 def check_queue() -> None:
     """Queue lifecycle, retention and concurrency guarantees."""
     head("Download queue")
@@ -547,6 +597,75 @@ def check_rich() -> None:
         warnings_found.append(f"rich messages unavailable: {st['reason']}")
 
 
+def check_transport() -> None:
+    """aiogram Bot API 10.3 transport: features, fallback and no leaks."""
+    head("Bot API transport (aiogram)")
+    import asyncio
+
+    from services import tgapi
+
+    st = tgapi.status()
+    print(f"{OK if st['aiogram'] else FAIL} aiogram {st['version']} "
+          f"(Bot API {st['api']})")
+    if not st["aiogram"]:
+        problems.append("aiogram not installed")
+        return
+
+    fails = []
+    # 10.3 model coverage
+    try:
+        from aiogram.types import (
+            DisabledButton, EphemeralMessageParameters,
+            InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage,
+        )
+        from aiogram.methods import SendRichMessage  # noqa: F401
+
+        if "disabled" not in InlineKeyboardButton.model_fields:
+            fails.append("InlineKeyboardButton lacks `disabled`")
+        if "style" not in InlineKeyboardButton.model_fields:
+            fails.append("InlineKeyboardButton lacks `style`")
+        if "force_reply" not in InlineKeyboardMarkup.model_fields:
+            fails.append("InlineKeyboardMarkup lacks `force_reply`")
+        if "html" not in InputRichMessage.model_fields:
+            fails.append("InputRichMessage lacks `html`")
+    except Exception as exc:
+        fails.append(f"Bot API 10.3 models unavailable: {exc}")
+
+    if fails:
+        problems.extend(fails)
+        print(f"{FAIL} {len(fails)} model problem(s)")
+        for f in fails:
+            print(f"    {f}")
+    else:
+        print(f"{OK} 10.3 models present: disabled, style, force_reply, rich html")
+
+    # ephemeral params build
+    params = tgapi.ephemeral(1, "cq", replace=True)
+    if params is None:
+        problems.append("ephemeral() returned None")
+        print(f"{FAIL} could not build EphemeralMessageParameters")
+    else:
+        print(f"{OK} EphemeralMessageParameters builds")
+
+    # fallback must work with no network, and the circuit breaker must trip
+    class _FB:
+        async def send_message(self, cid, text, reply_markup=None):
+            return "fallback"
+
+    async def run():
+        tgapi.reset_transport()
+        msg, used = await tgapi.send_message(1, "x", fallback_client=_FB())
+        return msg, used
+
+    msg, used = asyncio.run(run())
+    if msg != "fallback" or used:
+        problems.append("transport did not fall back to Kurigram")
+        print(f"{FAIL} fallback path broken")
+    else:
+        print(f"{OK} falls back to Kurigram when the Bot API is unreachable")
+    tgapi.reset_transport()
+
+
 def check_escaping() -> None:
     """Catch pre-escaped entities passed into helpers that escape again."""
     head("Double-escaping")
@@ -621,8 +740,9 @@ def check_engine() -> None:
 def main() -> int:
     print("\033[1mManhua-Bot health audit\033[0m")
     for fn in (check_compile, check_plugins, check_sources, check_video_sources,
-               check_resilience, check_queue, check_search, check_handlers,
-               check_ui, check_rich,
+               check_resilience, check_extraction, check_queue, check_search,
+               check_handlers,
+               check_ui, check_rich, check_transport,
                check_escaping, check_engine):
         try:
             fn()

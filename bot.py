@@ -97,6 +97,24 @@ async def main():
         except Exception as e:
             log.warning(f"[VENGINE] status check failed: {e}")
 
+        # Probe the Bot API 10.3 transport (rich messages, disabled buttons,
+        # ephemeral messages). Failure is non-fatal: everything falls back
+        # to Kurigram/classic HTML.
+        try:
+            from services import tgapi
+
+            st = await tgapi.probe()
+            if st.get("ok"):
+                log.info(
+                    f"[TGAPI] Bot API ready as @{st.get('username')} "
+                    f"(aiogram {tgapi.AIOGRAM_VERSION}, API {tgapi.AIOGRAM_API})"
+                )
+            else:
+                log.warning(f"[TGAPI] Bot API unavailable: {st.get('reason')} "
+                            "— using Kurigram only")
+        except Exception as e:
+            log.warning(f"[TGAPI] probe failed: {e}")
+
         from plugins.check.scheduler import check_job
         from services.backup import create_db_backup
 
@@ -125,9 +143,9 @@ async def main():
         finally:
             # Release the aiogram HTTP session used for native rich messages.
             try:
-                from utils.richmsg import close_rich
+                from services import tgapi
 
-                await close_rich()
+                await tgapi.close()
             except Exception:
                 pass
 

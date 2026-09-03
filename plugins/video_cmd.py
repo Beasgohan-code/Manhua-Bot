@@ -498,6 +498,26 @@ async def vsources_cmd(c, m):
     await m.reply(card.build(), reply_markup=kb.render())
 
 
+def _tgapi_ok() -> bool:
+    from services import tgapi
+
+    st = tgapi.status()
+    return bool(st.get("configured") and st.get("healthy", True))
+
+
+def _tgapi_detail() -> str:
+    from services import tgapi
+
+    st = tgapi.status()
+    if not st.get("aiogram"):
+        return "aiogram missing"
+    if not st.get("configured"):
+        return "no BOT_TOKEN"
+    if not st.get("healthy", True):
+        return f"unreachable ({st.get('failures')} fails)"
+    return f"aiogram {st.get('version')} / {st.get('api')}"
+
+
 def _engine_doc() -> RichDoc:
     """Native rich version of the engine panel (falls back automatically)."""
     from utils.tgui import backend_report
@@ -534,7 +554,8 @@ def _engine_doc() -> RichDoc:
             ["Button styles", mk(ui["kurigram_styles"]), "primary/danger/success"],
             ["aiogram", mk(ui["aiogram"]), f"Bot API {ui['aiogram_bot_api']}"],
             ["Disabled buttons", mk(ui["native_disabled"]), "native"],
-            ["Rich messages", mk(rich_available()["ok"]), rich_available()["reason"]],
+            ["Rich messages", mk(rich_available()["ok"]), rich_available()["reason"][:24]],
+            ["Bot API", mk(_tgapi_ok()), _tgapi_detail()],
         ],
         align=["l", "c", "l"],
     )
