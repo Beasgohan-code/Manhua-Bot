@@ -194,3 +194,55 @@ pip install -r requirements.txt
 ```
 
 Run `/vengine` in the bot to confirm what is active.
+
+## Modern Bot API UI (Kurigram + aiogram hybrid)
+
+`utils/tgui.py` builds keyboards declaratively and renders them to either
+backend, because neither one alone covers the whole Bot API surface:
+
+| Feature | Kurigram | aiogram 3.31 |
+|---------|----------|--------------|
+| `style="primary"` / `danger` / `success` | ✅ native MTProto | ✅ |
+| `copy_text` (tap to copy) | ✅ | ✅ |
+| `icon_custom_emoji_id` | ✅ | ✅ |
+| **`disabled` buttons** | ❌ emulated | ✅ native |
+
+```python
+from utils.tgui import Btn, Keyboard, Card, PRIMARY, DANGER, SUCCESS
+
+kb = (Keyboard()
+      .row(Btn("Download", "dl_1", style=PRIMARY),
+           Btn("Delete", "rm_1", style=DANGER))
+      .row(Btn("◂ Prev", "p_0", disabled=True),      # inert on MTProto
+           Btn("Copy ID", copy="abc123")))
+await m.reply(card.build(), reply_markup=kb.render())
+```
+
+On Kurigram a `disabled` button routes to an inert no-op callback (MTProto has
+no disabled flag), so it behaves correctly either way.
+
+### Rich formatting helpers
+
+- `heading(text, level)` — visual H1/H2/H3
+- `table(headers, rows, align=[...])` — box-drawn tables, emoji-width aware
+- `quote(text, expandable=True)` — collapsible blockquotes (Bot API 7.4)
+- `spoiler()`, `emoji(id)` (premium custom emoji), `pre(code, "python")`
+- `Card()` builder for consistent message layout
+
+## Health check
+
+```bash
+python tools/audit.py     # full static audit
+```
+
+Or `/audit` in the bot. Verifies syntax, plugin imports, every scraper
+interface, duplicate commands, callback shadowing, HTML legality and engine
+availability.
+
+### Scraper compatibility
+
+`sources/compat.py` normalises the two scraper generations. 34 sources use
+`get_manga()/get_chapter()`; 35 older ones use `get_chapters()/get_pictures()`.
+`/dl` previously only called `get_manga()`, so **direct download silently
+failed on those 35 sources** (Comick, Asura, Batoto, FlameComics, MangaPark,
+WeebCentral and more) — now fixed.

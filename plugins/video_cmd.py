@@ -32,6 +32,10 @@ from services.vmgr import vmgr
 from services import vengine
 from services.hplugin import plugin_status, status_line
 from services.video_dl import download_and_send_video, vget
+from utils.tgui import (
+    Btn, Keyboard, Card, table, quote, code as tcode, divider,
+    PRIMARY, DANGER, SUCCESS, NOOP_CB,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,34 +155,32 @@ async def _show_results(msg, skey: str, page: int):
     page = max(0, min(page, pages - 1))
     chunk = results[page * PER_PAGE : (page + 1) * PER_PAGE]
 
-    rows = []
+    kb = Keyboard()
     for i, r in enumerate(chunk):
         idx = page * PER_PAGE + i
         tag = "🔞" if r.get("adult") else "🎬"
-        rows.append(
-            [KB(f"{tag} {r['title'][:34]} · {r.get('src_name', '')[:14]}", f"vpick_{skey}_{idx}")]
-        )
+        kb.row(Btn(f"{tag} {r['title'][:34]} · {r.get('src_name', '')[:14]}",
+                   f"vpick_{skey}_{idx}", style=PRIMARY))
 
-    nav = []
-    if page > 0:
-        nav.append(KB("◂ Prev", f"vpg_{skey}_{page - 1}"))
-    nav.append(KB(f"{page + 1}/{pages}", "noop"))
-    if page < pages - 1:
-        nav.append(KB("Next ▸", f"vpg_{skey}_{page + 1}"))
-    rows.append(nav)
-    rows.append([KB("✕ Close", "close")])
+    kb.row(
+        Btn("◂ Prev", f"vpg_{skey}_{page - 1}", disabled=page == 0),
+        Btn(f"{page + 1}/{pages}", NOOP_CB, disabled=True, mark_disabled=False),
+        Btn("Next ▸", f"vpg_{skey}_{page + 1}", disabled=page >= pages - 1),
+    )
+    kb.row(Btn("✕ Close", "close", style=DANGER))
 
     ok = len(stats.get("ok", []))
     failed = len(stats.get("failed", []))
-    await safe_edit(
-        msg,
-        f"<b>🎬 Video Search</b>\n{rule()}\n"
-        f"Query: <code>{query}</code>\n"
-        f"Results: <code>{len(results)}</code> from <code>{ok}</code> sources"
-        + (f" · <code>{failed}</code> failed" if failed else "")
-        + f"\n{rule()}\n<i>Pick a title to list episodes.</i>",
-        KM(rows),
+    card = (
+        Card("Video Search", "🎬")
+        .field("Query", tcode(query))
+        .field("Results", f"{tcode(len(results))} from {tcode(ok)} sources"
+               + (f" · {tcode(failed)} failed" if failed else ""))
+        .field("Page", tcode(f"{page + 1}/{pages}"))
+        .divider()
+        .note("Pick a title to list its episodes.")
     )
+    await safe_edit(msg, card.build(), kb.render())
 
 
 @Client.on_callback_query(filters.regex(r"^vpg_"))
@@ -263,42 +265,43 @@ async def _show_episodes(msg, ekey: str, page: int, uid: int):
     page = max(0, min(page, pages - 1))
     chunk = eps[page * EPS_PER_PAGE : (page + 1) * EPS_PER_PAGE]
 
-    rows, row = [], []
-    for i, ep in enumerate(chunk):
-        idx = page * EPS_PER_PAGE + i
-        row.append(KB(str(ep.get("num") or idx + 1), f"vep_{ekey}_{idx}"))
-        if len(row) == 5:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-
-    nav = []
-    if page > 0:
-        nav.append(KB("◂", f"vep_pg_{ekey}_{page - 1}"))
-    nav.append(KB(f"{page + 1}/{pages}", "noop"))
-    if page < pages - 1:
-        nav.append(KB("▸", f"vep_pg_{ekey}_{page + 1}"))
-    if len(nav) > 1:
-        rows.append(nav)
-
-    rows.append(
-        [KB("⚙ Quality", f"vq_{ekey}"), KB("⬇️ Batch (25)", f"vall_{ekey}")]
+    kb = Keyboard()
+    kb.grid(
+        [Btn(str(ep.get("num") or page * EPS_PER_PAGE + i + 1),
+             f"vep_{ekey}_{page * EPS_PER_PAGE + i}")
+         for i, ep in enumerate(chunk)],
+        per_row=5,
     )
-    rows.append([KB("✕ Close", "close")])
+    kb.row(
+        Btn("◂", f"vep_pg_{ekey}_{page - 1}", disabled=page == 0),
+        Btn(f"{page + 1}/{pages}", NOOP_CB, disabled=True, mark_disabled=False),
+        Btn("▸", f"vep_pg_{ekey}_{page + 1}", disabled=page >= pages - 1),
+    )
+    kb.row(
+        Btn("⚙ Quality", f"vq_{ekey}", style=PRIMARY),
+        Btn(f"⬇️ Batch ({min(25, len(eps))})", f"vall_{ekey}", style=SUCCESS),
+    )
+    kb.row(Btn("✕ Close", "close", style=DANGER))
 
     quality = await vget(uid, "v_quality")
     mode = await vget(uid, "v_upload")
-    await safe_edit(
-        msg,
-        f"<b>🎬 {series['title'][:60]}</b>\n{rule()}\n"
-        f"Source: <code>{series.get('src_name') or series.get('src')}</code>\n"
-        f"Episodes: <code>{len(eps)}</code>\n"
-        f"Quality: <code>{vengine.quality_label(quality)}</code>\n"
-        f"Upload as: <code>{mode}</code>\n{rule()}\n"
-        f"<i>Tap an episode number to download.</i>{_engine_warn()}",
-        KM(rows),
+    card = (
+        Card(series["title"][:48], "🎬")
+        .table(
+            ["Setting", "Value"],
+            [
+                ["Source", series.get("src_name") or series.get("src") or "?"],
+                ["Episodes", len(eps)],
+                ["Quality", vengine.quality_label(quality)],
+                ["Upload as", mode],
+            ],
+        )
+        .note("Tap an episode number to download.")
     )
+    warn = _engine_warn()
+    if warn:
+        card.line(warn)
+    await safe_edit(msg, card.build(), kb.render())
 
 
 @Client.on_callback_query(filters.regex(r"^vep_pg_"))
@@ -312,24 +315,22 @@ async def vep_pg(c, q):
 async def vq_menu(c, q):
     ekey = q.data[len("vq_"):]
     curr = await vget(q.from_user.id, "v_quality")
-    rows = [
-        [
-            KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vqs_{ekey}_{x}")
-            for x in ("480", "720")
-        ],
-        [
-            KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vqs_{ekey}_{x}")
-            for x in ("1080", "best")
-        ],
-        [KB("◂ Back", f"vep_pg_{ekey}_0")],
-    ]
-    await safe_edit(
-        q.message,
-        f"<b>⚙ Download quality</b>\n{rule()}\n"
-        "<blockquote>Applies to all your downloads. The engine falls back "
-        "to the next best stream when a height is unavailable.</blockquote>",
-        KM(rows),
+    kb = Keyboard()
+    kb.grid(
+        [Btn(vengine.quality_label(x), f"vqs_{ekey}_{x}",
+             style=SUCCESS if curr == x else None, disabled=curr == x)
+         for x in ("480", "720", "1080", "best")],
+        per_row=2,
     )
+    kb.row(Btn("◂ Back", f"vep_pg_{ekey}_0", style=PRIMARY))
+    card = (
+        Card("Download Quality", "⚙")
+        .field("Current", tcode(vengine.quality_label(curr)))
+        .section("How it works",
+                 "The engine picks the best stream at or below the selected "
+                 "height, falling back automatically when unavailable.")
+    )
+    await safe_edit(q.message, card.build(), kb.render())
 
 
 @Client.on_callback_query(filters.regex(r"^vqs_"))
@@ -471,50 +472,128 @@ async def vsources_cmd(c, m):
     sfw = [s for s in vmgr.srcs.values() if not s.adult]
     adult = [s for s in vmgr.srcs.values() if s.adult]
 
-    body = f"<b>🎬 Anime ({len(sfw)})</b>\n" + "\n".join(
-        f"• {s.name} — <code>{s.sf}</code>" for s in sfw
-    )
+    card = Card("Video Sources", "🎬")
+    card.table(["Anime Source", "Code"], [[s.name, s.sf] for s in sfw])
     if allow:
-        body += f"\n\n<b>🔞 Hentai ({len(adult)})</b>\n" + "\n".join(
-            f"• {s.name} — <code>{s.sf}</code>" for s in adult
-        )
+        card.table(["Hentai Source", "Code"], [[s.name, s.sf] for s in adult])
     else:
-        body += f"\n\n🔞 <i>{len(adult)} adult sources hidden — /adult on</i>"
+        card.line(f"🔞 <i>{len(adult)} adult sources hidden — /adult on</i>")
+    card.note("/vsearch · /anime · /hentai · /vdl")
 
-    await m.reply(
-        f"<b>Video Sources</b>\n{rule()}\n<blockquote>{body}</blockquote>\n"
-        f"<i>/vsearch · /anime · /hentai · /vdl</i>",
-        reply_markup=KM([[KB("⚙ Engine", "vengine_cb"), KB("✕ Close", "close")]]),
+    kb = Keyboard().row(
+        Btn("⚙ Engine", "vengine_cb", style=PRIMARY),
+        Btn("🔞 Adult" if not allow else "🔞 Enabled", "noop_adult",
+            disabled=allow, style=None if allow else DANGER),
+        Btn("✕ Close", "close", style=DANGER),
     )
+    await m.reply(card.build(), reply_markup=kb.render())
 
 
 def _engine_text() -> str:
+    from utils.tgui import backend_report
+
     st = vengine.engine_status()
+    ui = backend_report()
 
     def mark(v):
         return "✅" if v else "❌"
 
-    return (
-        f"<b>⚙ Download Engine</b>\n{rule()}\n"
-        "<blockquote>"
-        f"{mark(st['yt_dlp'])} yt-dlp — extraction\n"
-        f"{mark(st['ffmpeg'])} ffmpeg — merge / metadata / remux\n"
-        f"{mark(st['aria2c'])} aria2c — accelerated segments"
-        "</blockquote>\n"
-        f"<b>hanime-plugin</b>\n<blockquote>{status_line()}</blockquote>\n"
-        + ("" if st["ffmpeg"] else
-           "\n<i>Without ffmpeg: no 1080p merge, no MKV subtitles.</i>\n"
-           "<code>apt install ffmpeg aria2</code>")
+    card = Card("Download Engine", "⚙")
+    card.table(
+        ["Component", "St", "Purpose"],
+        [
+            ["yt-dlp", mark(st["yt_dlp"]), "extraction"],
+            ["ffmpeg", mark(st["ffmpeg"]), "merge/meta/subs"],
+            ["aria2c", mark(st["aria2c"]), "fast segments"],
+        ],
     )
+    card.section("hanime-plugin", status_line())
+    card.table(
+        ["UI Backend", "St", "Detail"],
+        [
+            ["Kurigram", mark(ui["kurigram"]), "MTProto"],
+            ["Styles", mark(ui["kurigram_styles"]), "primary/danger"],
+            ["aiogram", mark(ui["aiogram"]), f"Bot API {ui['aiogram_bot_api']}"],
+            ["Disabled", mark(ui["native_disabled"]), "native btn"],
+        ],
+    )
+    if not st["ffmpeg"]:
+        card.line("<i>Without ffmpeg: no 1080p merge, no MKV subtitles.</i>")
+        card.line("<code>apt install ffmpeg aria2</code>")
+    return card.build()
+
+
+@Client.on_callback_query(filters.regex(r"^(ui_noop|noop_adult)$"))
+async def ui_noop_cb(c, q):
+    """Inert target for disabled buttons (MTProto has no `disabled` flag)."""
+    await q.answer("Unavailable here", cache_time=1)
 
 
 @Client.on_message(filters.command(["vengine", "vstatus"]))
 @force_sub
 async def vengine_cmd(c, m):
-    await m.reply(_engine_text(), reply_markup=KM([[KB("✕ Close", "close")]]))
+    kb = Keyboard().row(
+        Btn("↻ Refresh", "vengine_cb", style=PRIMARY),
+        Btn("✕ Close", "close", style=DANGER),
+    )
+    await m.reply(_engine_text(), reply_markup=kb.render())
 
 
 @Client.on_callback_query(filters.regex(r"^vengine_cb$"))
 async def vengine_cb(c, q):
     await q.answer()
-    await safe_edit(q.message, _engine_text(), KM([[KB("✕ Close", "close")]]))
+    kb = Keyboard().row(
+        Btn("↻ Refresh", "vengine_cb", style=PRIMARY),
+        Btn("✕ Close", "close", style=DANGER),
+    )
+    await safe_edit(q.message, _engine_text(), kb.render())
+
+
+# ------------------------------------------------------------------ /audit
+@Client.on_message(filters.command(["audit", "healthcheck"]))
+@force_sub
+async def audit_cmd(c, m):
+    """Live self-check: sources, interfaces, engine and UI backends."""
+    from services.mgr import mgr
+    from sources.compat import is_legacy
+    from utils.tgui import backend_report
+
+    modern = sum(1 for s in mgr.srcs.values() if callable(getattr(s, "get_manga", None)))
+    legacy = sum(1 for s in mgr.srcs.values() if is_legacy(s))
+    broken = len(mgr.srcs) - modern - legacy
+    sfw = sum(1 for s in vmgr.srcs.values() if not s.adult)
+    st = vengine.engine_status()
+    ui = backend_report()
+
+    def mk(v):
+        return "✅" if v else "❌"
+
+    card = (
+        Card("Health Check", "🩺")
+        .table(
+            ["Component", "Count", "St"],
+            [
+                ["Manga src", len(mgr.srcs), mk(broken == 0)],
+                ["  modern", modern, "—"],
+                ["  legacy", legacy, "—"],
+                ["Video src", len(vmgr.srcs), mk(len(vmgr.srcs) > 0)],
+                ["  sfw/adult", f"{sfw}/{len(vmgr.srcs) - sfw}", "—"],
+            ],
+        )
+        .table(
+            ["Engine", "St"],
+            [
+                ["yt-dlp", mk(st["yt_dlp"])],
+                ["ffmpeg", mk(st["ffmpeg"])],
+                ["aria2c", mk(st["aria2c"])],
+                ["hanime-plugin", mk(plugin_status()["installed"])],
+                ["aiogram UI", mk(ui["aiogram"])],
+            ],
+        )
+        .note("Run <code>python tools/audit.py</code> for the full report.")
+    )
+    kb = Keyboard().row(
+        Btn("⚙ Engine", "vengine_cb", style=PRIMARY),
+        Btn("✕ Close", "close", style=DANGER),
+    )
+    await m.reply(card.build(), reply_markup=kb.render())

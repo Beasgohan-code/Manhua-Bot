@@ -19,3 +19,5 @@ yt-dlp
 # video engine
 hanime-plugin
 pycryptodomex
+# modern Bot API UI (disabled buttons, Bot API 10.x models)
+aiogram>=3.31

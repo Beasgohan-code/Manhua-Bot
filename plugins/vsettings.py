@@ -21,6 +21,7 @@ from plugins.settings.shared import StateDictWrapper, get_temp_dir
 # would swallow input meant for this panel.
 _vstates = StateDictWrapper({})
 from services.video_dl import DEFAULTS, vget, vset, has_ffmpeg
+from utils.tgui import Btn, Keyboard, Card, code as tcode, PRIMARY, DANGER, SUCCESS
 
 log = logging.getLogger(__name__)
 
@@ -75,24 +76,23 @@ async def _panel_text(uid: int) -> str:
 
 
 def _panel_kb(mode: str, thumb, split, subs) -> KM:
-    return KM(
-        [
-            [
-                KB(f"{'📄' if mode == 'document' else '🎬'} Upload: "
-                   f"{'Document' if mode == 'document' else 'Video'}", "vs_mode"),
-            ],
-            [KB("▸ Quality", "vs_qmenu"), KB("▸ Metadata", "vs_meta")],
-            [
-                KB(f"🖼 Thumbnail {_set(thumb)}", "vs_thumb"),
-                KB(f"✂️ Split {_s(split)}", "vs_split"),
-            ],
-            [
-                KB(f"💬 Subtitles {_s(subs)}", "vs_subs"),
-                KB("⚙ Engine", "vengine_cb"),
-            ],
-            [KB("▸ Manga file type", "vs_ftype"), KB("↻ Reset", "vs_reset")],
-            [KB("✕ Close", "close")],
-        ]
+    return (
+        Keyboard()
+        .row(Btn(f"{'📄' if mode == 'document' else '🎬'} Upload: "
+                 f"{'Document' if mode == 'document' else 'Video'}",
+                 "vs_mode", style=PRIMARY))
+        .row(Btn("▸ Quality", "vs_qmenu"), Btn("▸ Metadata", "vs_meta"))
+        .row(Btn(f"🖼 Thumbnail {_set(thumb)}", "vs_thumb",
+                 style=SUCCESS if thumb else None),
+             Btn(f"✂️ Split {_s(split)}", "vs_split",
+                 style=SUCCESS if split else None))
+        .row(Btn(f"💬 Subtitles {_s(subs)}", "vs_subs",
+                 style=SUCCESS if subs else None),
+             Btn("⚙ Engine", "vengine_cb"))
+        .row(Btn("▸ Manga file type", "vs_ftype"),
+             Btn("↻ Reset", "vs_reset", style=DANGER))
+        .row(Btn("✕ Close", "close", style=DANGER))
+        .render()
     )
 
 

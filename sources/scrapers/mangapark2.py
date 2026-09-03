@@ -9,7 +9,7 @@ class MangaParkAltWebs(Scraper):
     def __init__(self):
         super().__init__()
         self.url = "https://mangapark.net"
-        self.sf = "mpk"
+        self.sf = "mpk2"
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://mangapark.net/",
