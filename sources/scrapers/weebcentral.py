@@ -40,16 +40,32 @@ class WeebCentralWebs(Scraper):
     headers["HX-Target"] = "quick-search-result"
     headers["HX-Trigger"] = "quick-search-input"
     headers["HX-Trigger-Name"] = "text"
-    content = await to_thread(self.scraper.post, request_url, params, headers=headers)
-    if content.status_code == 200:
-      bs = BeautifulSoup(content.text, "html.parser")
-      cards = bs.find_all("a")
-      for card in cards:
-        data = {}
-        data['url'] = card.get('href').strip()
-        data['poster'] = card.findNext("img")['src'].strip()
-        data['title'] = card.findNext("div").findNext("div").text.strip()
-        results.append(data)
+    try:
+      content = await to_thread(self.scraper.post, request_url, params, headers=headers)
+    except Exception as e:
+      # this scraper bypasses Scraper.post(), so network errors surface raw
+      logger.warning(f"[WeebCentral] search request failed: {e}")
+      return results
+    if content is None or getattr(content, "status_code", None) != 200:
+      return results
+    bs = BeautifulSoup(content.text, "html.parser")
+    for card in bs.find_all("a"):
+      try:
+        href = card.get('href')
+        if not href:
+          continue
+        img = card.findNext("img")
+        holder = card.findNext("div")
+        title_el = holder.findNext("div") if holder else None
+        if not title_el:
+          continue
+        results.append({
+            'url': href.strip(),
+            'poster': (img['src'].strip() if img and img.has_attr('src') else ''),
+            'title': title_el.text.strip(),
+        })
+      except Exception:
+        continue
     return results
   async def get_chapters(self, data, page: int=1):
     results = data

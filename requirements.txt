@@ -1,5 +1,7 @@
 # Manhua-Bot (fork / enhanced)
 kurigram
+# native crypto: large speedup for MTProto uploads/downloads
+TgCrypto
 asyncpg>=0.29.0
 python-dotenv
 beautifulsoup4
@@ -15,3 +17,9 @@ reportlab
 httpx
 lxml
 orjson
+yt-dlp
+# video engine
+hanime-plugin
+pycryptodomex
+# modern Bot API UI (disabled buttons, Bot API 10.x models)
+aiogram>=3.31

@@ -51,29 +51,37 @@ def kv_block(rows: Sequence[tuple], bullet: str = "") -> str:
     return block(body) if body else ""
 
 
-def table(headers: Sequence[str], rows: Sequence[Sequence[Any]], max_col: int = 16) -> str:
-    def trunc(s, n):
-        s = str(s)
-        return s if len(s) <= n else s[: n - 1] + "…"
+def table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    max_col: int = 16,
+    align: Optional[Sequence[str]] = None,
+    borders: bool = True,
+) -> str:
+    """Monospaced table. Delegates to the display-width-aware renderer in
+    utils.tgui so emoji/CJK cells do not break column alignment."""
+    from utils.tgui import table as _t
 
-    cols = len(headers)
-    widths = [min(max(len(str(x)), 3), max_col) for x in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            if i < cols:
-                widths[i] = min(max(widths[i], len(str(cell))), max_col)
+    return _t(headers, rows, align=align, max_col=max_col, borders=borders)
 
-    def fmt(cells):
-        parts = []
-        for i in range(cols):
-            val = trunc(cells[i] if i < len(cells) else "", widths[i])
-            parts.append(val.ljust(widths[i]))
-        return " │ ".join(parts)
 
-    lines = [fmt(headers), "─┼─".join("─" * w for w in widths)]
-    for row in rows:
-        lines.append(fmt(row))
-    return pre("\n".join(lines))
+def columns(items: Sequence[Any], cols: int = 2, gap: int = 2) -> str:
+    """Lay a flat list out in aligned monospaced columns."""
+    from utils.tgui import columns as _c
+
+    return _c(items, cols=cols, gap=gap)
+
+
+def heading2(text: str, emoji: str = "") -> str:
+    from utils.tgui import heading as _h
+
+    return _h(text, 2, emoji)
+
+
+def divider(width: int = 26) -> str:
+    from utils.tgui import divider as _d
+
+    return _d(width)
 
 
 class RichMessage:
@@ -102,6 +110,47 @@ class RichMessage:
 
     def text(self, text: str) -> "RichMessage":
         self.parts.append(text)
+        return self
+
+    def table(
+        self,
+        headers: Sequence[str],
+        rows: Sequence[Sequence[Any]],
+        align: Optional[Sequence[str]] = None,
+        max_col: int = 16,
+        borders: bool = True,
+    ) -> "RichMessage":
+        """Add a bordered, emoji-safe table."""
+        if rows:
+            self.parts.append(table(headers, rows, max_col, align, borders))
+        return self
+
+    def columns(self, items: Sequence[Any], cols: int = 2) -> "RichMessage":
+        """Add a flat list rendered as aligned columns."""
+        if items:
+            self.parts.append(columns(items, cols))
+        return self
+
+    def heading(self, text: str, emoji: str = "", level: int = 2) -> "RichMessage":
+        from utils.tgui import heading as _h
+
+        self.parts.append(_h(text, level, emoji))
+        return self
+
+    def divider(self, width: int = 26) -> "RichMessage":
+        self.parts.append(divider(width))
+        return self
+
+    def progress(self, pct: float, label: str = "") -> "RichMessage":
+        from utils.tgui import bar
+
+        self.parts.append(
+            f"{bar(pct)} {bold(f'{pct:.0f}%')}" + (f" {label}" if label else "")
+        )
+        return self
+
+    def field(self, label: str, value: Any) -> "RichMessage":
+        self.parts.append(f"{bold(label)}: {value}")
         return self
 
     def tip(self, text: str) -> "RichMessage":
@@ -175,6 +224,17 @@ HELP_TEXT = (
         "/dl &lt;src&gt; &lt;id&gt; [10-15] — direct / range DL",
     )
     .section(
+        "Anime & Video",
+        "/anime &lt;name&gt; — search anime sources\n"
+        "/hentai &lt;name&gt; — adult video search (/adult on)\n"
+        "/vsearch &lt;name&gt; — all video sources\n"
+        "/vdl &lt;src&gt; &lt;id&gt; [1-5] — direct episode DL\n"
+        "/vsources — video site list\n"
+        "/vengine — engine &amp; plugin status\n"
+        "/audit — health check\n"
+        "/vhistory — recent searches",
+    )
+    .section(
         "Library",
         "/subs — tracked series\n"
         "/unsubs &lt;sid&gt; — stop tracking\n"
@@ -183,12 +243,14 @@ HELP_TEXT = (
     )
     .section(
         "Output",
+        "/usettings — your upload settings\n"
+        "  · video or document · thumbnail · metadata\n"
         "/merge N — chapters per PDF\n"
         "/pdfpass text — lock PDFs\n"
         "Settings file types: PDF · CBZ · Links",
     )
     .section(
-        "Safety &amp; status",
+        "Safety & status",
         "/adult on|off — NSFW gate\n"
         "/stats — health dashboard\n"
         "/help — this menu",

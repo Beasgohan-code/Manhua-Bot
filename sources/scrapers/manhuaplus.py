@@ -30,10 +30,17 @@ class ManhuaplusWebs(Scraper):
     }
     mangas = await self.post(url, params=params, rjson=True, headers=self.headers)
     results = []
-    if mangas and "list" in mangas:
+    if isinstance(mangas, dict) and isinstance(mangas.get("list"), list):
       for card in mangas['list']:
-        card['title'] = card.pop("name")
-        card['poster'] = urljoin(self.url, card.pop("cover"))
+        if not isinstance(card, dict):
+          continue
+        # "name"/"cover" are not guaranteed; urljoin() rejects non-str.
+        title = card.pop("name", None) or card.get("title")
+        if not title:
+          continue
+        card['title'] = title
+        cover = card.pop("cover", None)
+        card['poster'] = urljoin(self.url, cover) if isinstance(cover, str) else ''
         results.append(card)
     return results
   async def get_chapters(self, data, page: int=1):

@@ -84,36 +84,25 @@ async def dl_cmd(c, m):
     status = await m.reply(f"<blockquote>⋯ Loading <code>{src}</code>…</blockquote>")
 
     try:
-        manga = None
-        for meth in ("get_manga", "get", "manga"):
-            fn = getattr(scraper, meth, None)
-            if callable(fn):
-                try:
-                    manga = await asyncio.wait_for(fn(series), timeout=40)
-                    if manga:
-                        break
-                except Exception as e:
-                    log.warning(f"[DLCMD] {meth}: {e}")
+        # One resolver for both scraper generations (see sources/compat.py):
+        # 35 legacy sources have no get_manga(), so the old call chain
+        # silently failed for them.
+        from sources.compat import resolve_series
 
+        manga = await resolve_series(scraper, series, timeout=60)
         if not manga:
-            return await status.edit("<blockquote>⚠ Series not found</blockquote>")
+            return await status.edit(
+                "<blockquote>⚠ Series not found on this source</blockquote>"
+            )
 
         manga["src"] = src if isinstance(src, str) else getattr(scraper, "sf", src)
-
         chapters = manga.get("chapters") or []
-        if not chapters and hasattr(scraper, "get_chapters"):
-            try:
-                raw = await asyncio.wait_for(scraper.get_chapters(manga), timeout=60)
-                if isinstance(raw, dict):
-                    manga.update(raw)
-                    chapters = raw.get("chapters") or []
-                elif isinstance(raw, list):
-                    chapters = raw
-            except Exception as e:
-                log.warning(f"[DLCMD] get_chapters: {e}")
-
         if not chapters:
-            chapters = [{"title": manga.get("title"), "url": manga.get("url") or series, "num": "1"}]
+            chapters = [{
+                "title": manga.get("title"),
+                "url": manga.get("url") or series,
+                "num": "1",
+            }]
 
         # select targets
         targets = []

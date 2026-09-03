@@ -423,7 +423,10 @@ async def download_and_send(app, chat_id, manga_info: dict, chapter: dict, statu
     qitem = None
     if user_id:
         try:
-            qitem = await dl_queue.add(user_id, title, str(chap_title))
+            qitem = await dl_queue.add(
+                user_id, title, str(chap_title),
+                source=manga_info.get("src") or "", kind="manga",
+            )
             await dl_queue.set_status(qitem.id, "running")
         except Exception:
             qitem = None
@@ -540,7 +543,26 @@ async def download_and_send(app, chat_id, manga_info: dict, chapter: dict, statu
                 except Exception:
                     pass
             return pdf_path
+    except Exception as _exc:
+        # Nothing used to set "failed": a crash left the item stuck on
+        # "running" forever, holding the user's concurrency slot.
+        if qitem:
+            try:
+                await dl_queue.set_status(qitem.id, "failed", error=str(_exc))
+            except Exception:
+                pass
+        raise
     finally:
+        # Never leave an item mid-flight, whatever exit path we took.
+        if qitem:
+            try:
+                _it = await dl_queue.get(qitem.id)
+                if _it and _it.status == "running":
+                    await dl_queue.set_status(
+                        qitem.id, "failed", error="ended without completing"
+                    )
+            except Exception:
+                pass
         shutil.rmtree(work, ignore_errors=True)
 
 

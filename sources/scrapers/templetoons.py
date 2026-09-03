@@ -19,13 +19,15 @@ class TempleToonsWebs(Scraper):
   async def search(self, query: str = ""):
     results = []
     mangas = await self.get(self.api_url, cs=True, rjson=True)
-    if mangas:
+    if isinstance(mangas, list):
       for card in mangas:
-        if query.lower() in card['title'].lower():
+        if not isinstance(card, dict) or not card.get('title'):
+          continue
+        if query.lower() in str(card['title']).lower():
           data = {}
           data['title'] = card["title"]
-          data['poster'] = card['thumbnail']
-          data['url'] = f"https://templetoons.com/comic/{card['series_slug']}"
+          data['poster'] = card.get('thumbnail', '')
+          data['url'] = f"https://templetoons.com/comic/{card.get('series_slug', '')}"
           results.append(data)
     return results
   async def get_chapters(self, data, page: int=1):

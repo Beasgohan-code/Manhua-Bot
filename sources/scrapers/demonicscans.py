@@ -32,15 +32,38 @@ class DemonicScansWebs(Scraper):
     cards = bs.find_all("a")
     results = []
     for card in cards:
-      data = {}
-      data['url'] = urljoin(self.url, card.get('href').strip())
-      poster = card.find_next('img').get('src').strip()
-      parsed = urlparse(poster)
-      poster = quote(parsed.path)
-      poster = parsed._replace(path=poster).geturl()
-      data['poster'] = poster
-      data['title'] = card.find_next('div').find_next("div").text.strip()
-      results.append(data)
+      # The page contains plenty of <a> tags that are not result cards
+      # (nav, footer, pagination); every field here must be optional.
+      try:
+        href = (card.get('href') or '').strip()
+        # find_all("a") also matches nav/footer/pagination links; those have
+        # no manga path and would otherwise yield bogus rows whose title is
+        # scavenged from the next card's markup.
+        if not href or not any(
+            seg in href for seg in ('/manga/', '/series/', '/comic/', '/title/')
+        ):
+          continue
+        data = {}
+        data['url'] = urljoin(self.url, href)
+
+        img = card.find_next('img')
+        src = img.get('src') if img else None
+        if src:
+          parsed = urlparse(src.strip())
+          data['poster'] = parsed._replace(path=quote(parsed.path)).geturl()
+        else:
+          data['poster'] = ''
+
+        outer = card.find_next('div')
+        inner = outer.find_next("div") if outer else None
+        title = (inner.text if inner else '') or card.get('title') or card.text
+        title = (title or '').strip()
+        if not title:
+          continue
+        data['title'] = title
+        results.append(data)
+      except Exception:
+        continue
     return results
   async def get_chapters(self, data, page: int=1):
     results = data

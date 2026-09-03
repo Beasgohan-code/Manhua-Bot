@@ -87,6 +87,34 @@ async def main():
         await start_listener()
         log.info("Channel listener ready")
 
+        # Report video engine + hanime-plugin availability at boot so a
+        # missing ffmpeg/extractor shows up in logs, not mid-download.
+        try:
+            from services.hplugin import log_status
+            from services import vengine
+            log_status()
+            log.info(f"[VENGINE] {vengine.engine_status()}")
+        except Exception as e:
+            log.warning(f"[VENGINE] status check failed: {e}")
+
+        # Probe the Bot API 10.3 transport (rich messages, disabled buttons,
+        # ephemeral messages). Failure is non-fatal: everything falls back
+        # to Kurigram/classic HTML.
+        try:
+            from services import tgapi
+
+            st = await tgapi.probe()
+            if st.get("ok"):
+                log.info(
+                    f"[TGAPI] Bot API ready as @{st.get('username')} "
+                    f"(aiogram {tgapi.AIOGRAM_VERSION}, API {tgapi.AIOGRAM_API})"
+                )
+            else:
+                log.warning(f"[TGAPI] Bot API unavailable: {st.get('reason')} "
+                            "— using Kurigram only")
+        except Exception as e:
+            log.warning(f"[TGAPI] probe failed: {e}")
+
         from plugins.check.scheduler import check_job
         from services.backup import create_db_backup
 
@@ -95,10 +123,31 @@ async def main():
         sched.add_job(storage_cleanup, "interval", minutes=10)
         sched.add_job(memory_cleanup, "interval", minutes=5)
         sched.add_job(create_db_backup, "interval", hours=24, args=[app])
+        async def sweep_stale_queue():
+            """Recover downloads killed by a crash/restart (see services/queue)."""
+            try:
+                from services.queue import dl_queue
+
+                n = await dl_queue.fail_stale()
+                if n:
+                    log.warning(f"[QUEUE] marked {n} stale running task(s) as failed")
+            except Exception as e:
+                log.debug(f"[QUEUE] sweep failed: {e}")
+
+        sched.add_job(sweep_stale_queue, "interval", minutes=5)
         sched.add_job(process_persistent_tasks, "interval", minutes=1)
         sched.start()
         log.info("Scheduler started (check: 5m, cache: 10m, storage: 10m, memory: 5m, backup: 24h)")
-        await idle()
+        try:
+            await idle()
+        finally:
+            # Release the aiogram HTTP session used for native rich messages.
+            try:
+                from services import tgapi
+
+                await tgapi.close()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import asyncio

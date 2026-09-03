@@ -30,8 +30,10 @@ class FlameComicsWebs(Scraper):
       content = await self.get(url, rjson=True, headers=self.headers)
       results = []
       search_normalized = self.normalize(query)
-      if content:
+      if isinstance(content, list):
         for data in content:
+          if not isinstance(data, dict) or "label" not in data:
+            continue
           title_normalized = self.normalize(data["label"])
           if search_normalized in title_normalized:
             data['title'] = data["label"]

@@ -2,8 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# ffmpeg: stream merging, metadata, thumbnails, subtitle remux
+# aria2:  accelerated segmented/HLS downloads
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libpq-dev curl \
+    gcc libpq-dev curl ffmpeg aria2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

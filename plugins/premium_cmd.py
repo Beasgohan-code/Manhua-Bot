@@ -22,7 +22,9 @@ async def add_premium(c, m):
     await db.set_premium(uid, True, days)
     await m.reply(RichMessage("Premium", "⭐").success(f"Added {code(uid)} · {days} days").build())
 
-@Client.on_message(filters.command(["del", "delpremium"]))
+# NOTE: plain "/del" is claimed by plugins/list.py (subscription delete),
+# which registers first and would shadow this handler entirely.
+@Client.on_message(filters.command(["delpremium", "delprem"]))
 @force_sub
 async def del_premium(c, m):
     if not _owner(m.from_user.id):

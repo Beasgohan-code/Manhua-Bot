@@ -19,16 +19,22 @@ class MangaCloudWebs(Scraper):
     url = f"{self.api_base}/search"
     payload = {"terms": query}
     data = await self.post(url, rjson=True, json=payload, headers=self.headers)
-    if not data:
+    if not isinstance(data, dict):
+      return []
+    entries = data.get("data")
+    if not isinstance(entries, list):
       return []
     results = []
-    for result in data.get("data", [])[:8]:
+    for result in entries[:8]:
+      if not isinstance(result, dict):
+        continue
       title = result.get("title", "")
       manga_id = result.get("id", "")
       url = f"https://mangacloud.org/comic/{manga_id}"
-      cover = result.get("cover", {})
+      cover = result.get("cover")
+      cover = cover if isinstance(cover, dict) else {}
       cover_id = cover.get("id", "")
-      cover_fmt = cover.get("f", "jpeg").lower()
+      cover_fmt = str(cover.get("f", "jpeg")).lower()
       thumbnail = f"https://pika.mangacloud.org/{manga_id}/{cover_id}.{cover_fmt}" if cover_id else ""
       results.append({
           "title": title,
