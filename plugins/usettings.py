@@ -12,7 +12,12 @@ def _s(val):
     return "●" if val else "○"
 def _set(val):
     return "◆" if val else "◇"
-@Client.on_message(filters.command("usettings") & filters.user(Config.OWNER_ID))
+@Client.on_message(
+    filters.command("usettings")
+    & filters.user(Config.OWNER_ID)
+    # bare `/usettings` is the per-user panel in plugins/vsettings.py
+    & filters.create(lambda _, __, m: len(getattr(m, "command", [])) > 1)
+)
 async def usettings_cmd(c, m):
     args = m.command[1:]
     if not args:

@@ -175,6 +175,14 @@ HELP_TEXT = (
         "/dl &lt;src&gt; &lt;id&gt; [10-15] — direct / range DL",
     )
     .section(
+        "Anime &amp; Video",
+        "/anime &lt;name&gt; — search anime sources\n"
+        "/hentai &lt;name&gt; — adult video search (/adult on)\n"
+        "/vsearch &lt;name&gt; — all video sources\n"
+        "/vdl &lt;src&gt; &lt;id&gt; [1-5] — direct episode DL\n"
+        "/vsources — video site list",
+    )
+    .section(
         "Library",
         "/subs — tracked series\n"
         "/unsubs &lt;sid&gt; — stop tracking\n"
@@ -183,6 +191,8 @@ HELP_TEXT = (
     )
     .section(
         "Output",
+        "/usettings — your upload settings\n"
+        "  · video or document · thumbnail · metadata\n"
         "/merge N — chapters per PDF\n"
         "/pdfpass text — lock PDFs\n"
         "Settings file types: PDF · CBZ · Links",
