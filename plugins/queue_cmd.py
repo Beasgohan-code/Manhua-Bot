@@ -13,52 +13,92 @@ async def queue_cmd(c, m):
         return await m.reply(
             RichMessage("Download Queue", "📥").tip("Queue is empty.").build()
         )
-    shown = items[-20:]
-    ICON = {
-        "done": "✅", "failed": "❌", "error": "❌",
-        "running": "⏳", "active": "⏳",
-        "pending": "🕒", "queued": "🕒",
-    }
+    from services.queue import RUNNING, PENDING, DONE, FAILED, CANCELLED
+    from utils.richmsg import RichDoc, send_rich
+
+    ICON = {DONE: "✅", FAILED: "❌", RUNNING: "⏳", PENDING: "🕒", CANCELLED: "🚫"}
+    shown = [i for i in items if i.is_active][:15] or items[-15:]
+
     counts = {}
     for it in items:
         counts[it.status] = counts.get(it.status, 0) + 1
 
-    msg = RichMessage("Download Queue", "📥")
-    msg.table(
-        ["St", "Title", "Ch", "ID"],
+    def fmt_eta(it):
+        e = it.eta
+        if e is None:
+            return "—"
+        m, sec = divmod(int(e), 60)
+        return f"{m}m{sec:02d}s" if m else f"{sec}s"
+
+    doc = RichDoc().heading("Download Queue", 1, "📥")
+    doc.table(
+        ["", "Title", "Ch", "Progress", "ETA"],
         [
             [
-                ICON.get(str(it.status).lower(), "•"),
-                it.title or "?",
-                it.chapter or "—",
-                it.id,
+                ICON.get(it.status, "•"),
+                it.title,
+                it.chapter,
+                f"{it.progress:.0f}%" if it.is_active else it.status,
+                fmt_eta(it),
             ]
             for it in shown
         ],
-        align=["c", "l", "r", "l"],
-        max_col=20,
+        align=["c", "l", "r", "r", "r"],
+        caption=f"{len(items)} task(s) total",
     )
+
+    active = [i for i in items if i.is_active]
+    if active:
+        doc.heading("In progress", 2)
+        for it in active[:3]:
+            doc.progress(it.progress, f"{it.title[:28]} — {it.chapter}")
+
     if counts:
-        msg.heading("Summary", "📊").table(
-            ["Status", "Count"],
-            [[k, v] for k, v in sorted(counts.items())],
-            align=["l", "r"],
-        )
-    errs = [it for it in shown if getattr(it, "error", None)]
+        doc.heading("Summary", 2)
+        doc.bullets([f"{ICON.get(k, '•')} {k}: {v}" for k, v in sorted(counts.items())])
+
+    errs = [it for it in items if it.error]
     if errs:
-        msg.section(
-            "Errors",
-            "\n".join(f"{code(e.id)}: {str(e.error)[:80]}" for e in errs[:5]),
+        doc.details(
+            f"⚠️ Errors ({len(errs)})",
+            "".join(f"<p>{it.title}: {it.error}</p>" for it in errs[:5]),
         )
-    if len(items) > len(shown):
-        msg.tip(f"Showing last {len(shown)} of {len(items)}")
 
     kbd = Keyboard().row(
         Btn("↻ Refresh", "queue_refresh", style=PRIMARY),
         Btn("🧹 Clear", "queue_clear", style=DANGER),
-        Btn("✗ Close", "close", style=DANGER),
     )
-    await m.reply(msg.build(), reply_markup=kbd.render())
+    for it in active[:5]:
+        kbd.row(Btn(f"✕ Cancel {it.title[:20]} ({it.chapter})", f"qcancel_{it.id}",
+                    style=DANGER))
+    kbd.row(Btn("✗ Close", "close", style=DANGER))
+
+    sent = await send_rich(m.chat.id, doc, reply_markup=kbd, fallback_client=None)
+    if sent is None:
+        await m.reply(doc.fallback(), reply_markup=kbd.render())
+
+
+@Client.on_callback_query(filters.regex(r"^qcancel_"))
+async def queue_cancel_cb(c, q):
+    qid = q.data[len("qcancel_"):]
+    ok = await dl_queue.cancel(qid, user_id=q.from_user.id)
+    await q.answer("Cancelled" if ok else "Already finished", show_alert=not ok)
+    if ok:
+        fn = queue_cmd
+        while hasattr(fn, "__wrapped__"):
+            fn = fn.__wrapped__
+
+        class _M:
+            from_user = q.from_user
+            chat = q.message.chat
+
+            async def reply(self, text, reply_markup=None):
+                try:
+                    await q.message.edit(text, reply_markup=reply_markup)
+                except Exception:
+                    pass
+
+        await fn(c, _M())
 
 
 @Client.on_callback_query(filters.regex(r"^queue_refresh$"))

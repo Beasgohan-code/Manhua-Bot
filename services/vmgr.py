@@ -113,20 +113,18 @@ class VideoMgr:
         for chunk in await asyncio.gather(*(_one(s) for s in targets)):
             results.extend(chunk)
 
-        # Exact/prefix title matches first, then by source order.
-        q = (query or "").lower().strip()
+        # Relevance-rank and collapse the same title across sources.
+        try:
+            from services.search_util import dedupe
 
-        def rank(item):
-            t = (item.get("title") or "").lower()
-            if t == q:
-                return 0
-            if t.startswith(q):
-                return 1
-            if q in t:
-                return 2
-            return 3
+            results = dedupe(results, query)
+        except Exception as exc:
+            log.debug(f"[VMGR] dedupe skipped: {exc}")
+            results.sort(
+                key=lambda i: (query or "").lower() not in (i.get("title") or "").lower()
+            )
 
-        results.sort(key=rank)
+        state["unique"] = len(results)
         self.last_stats = state
         return results
 

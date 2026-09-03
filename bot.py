@@ -105,6 +105,18 @@ async def main():
         sched.add_job(storage_cleanup, "interval", minutes=10)
         sched.add_job(memory_cleanup, "interval", minutes=5)
         sched.add_job(create_db_backup, "interval", hours=24, args=[app])
+        async def sweep_stale_queue():
+            """Recover downloads killed by a crash/restart (see services/queue)."""
+            try:
+                from services.queue import dl_queue
+
+                n = await dl_queue.fail_stale()
+                if n:
+                    log.warning(f"[QUEUE] marked {n} stale running task(s) as failed")
+            except Exception as e:
+                log.debug(f"[QUEUE] sweep failed: {e}")
+
+        sched.add_job(sweep_stale_queue, "interval", minutes=5)
         sched.add_job(process_persistent_tasks, "interval", minutes=1)
         sched.start()
         log.info("Scheduler started (check: 5m, cache: 10m, storage: 10m, memory: 5m, backup: 24h)")

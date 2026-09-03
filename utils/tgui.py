@@ -70,6 +70,7 @@ if HAS_AIOGRAM:
 PRIMARY = "primary"
 DANGER = "danger"
 SUCCESS = "success"
+LINK = "link"      # Bot API 10.3 — borderless, callback buttons only
 DEFAULT = "default"
 
 _PYRO_STYLE_MAP = {}
@@ -121,6 +122,7 @@ class Btn:
             kw["callback_data"] = NOOP_CB if self.disabled else (self.data or NOOP_CB)
 
         if self.style and self.style != DEFAULT and _PYRO_STYLE_MAP:
+            # LINK is Bot-API-only; MTProto has no equivalent flag.
             st = _PYRO_STYLE_MAP.get(self.style)
             if st is not None:
                 kw["style"] = st
@@ -155,10 +157,17 @@ class Btn:
 
 
 class Keyboard:
-    """Declarative keyboard that renders to Kurigram or aiogram."""
+    """Declarative keyboard that renders to Kurigram or aiogram.
 
-    def __init__(self, rows: Optional[List[List[Btn]]] = None):
+    `force_reply` (Bot API 10.3) opens the reply composer as if the user had
+    tapped Reply — far cleaner than a state-machine text listener for
+    one-shot prompts. It only takes effect on the aiogram/Bot API path.
+    """
+
+    def __init__(self, rows: Optional[List[List[Btn]]] = None,
+                 force_reply: bool = False):
         self.rows: List[List[Btn]] = rows or []
+        self.force_reply = force_reply
 
     def row(self, *buttons: Btn) -> "Keyboard":
         real = [b for b in buttons if b is not None]
@@ -185,8 +194,14 @@ class Keyboard:
     def render_aiogram(self):
         if not HAS_AIOGRAM:
             return None
+        kw = {}
+        if self.force_reply:
+            # Field exists only on Bot API 10.3+ models.
+            if "force_reply" in getattr(_AM, "model_fields", {}):
+                kw["force_reply"] = True
         return _AM(
-            inline_keyboard=[[b.render_aiogram() for b in row] for row in self.rows]
+            inline_keyboard=[[b.render_aiogram() for b in row] for row in self.rows],
+            **kw,
         )
 
     # Convenience so existing `reply_markup=kb` call sites keep working.

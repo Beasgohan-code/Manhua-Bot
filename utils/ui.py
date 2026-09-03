@@ -231,7 +231,8 @@ HELP_TEXT = (
         "/vdl &lt;src&gt; &lt;id&gt; [1-5] — direct episode DL\n"
         "/vsources — video site list\n"
         "/vengine — engine &amp; plugin status\n"
-        "/audit — health check",
+        "/audit — health check\n"
+        "/vhistory — recent searches",
     )
     .section(
         "Library",

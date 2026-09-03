@@ -130,6 +130,12 @@ async def _do_search(c, m, query: str, mode: str):
         results = [r for r in results if r.get("adult")]
 
     stats = getattr(vmgr, "last_stats", {}) or {}
+    try:
+        from services.search_util import remember
+
+        remember(uid, query, hits=len(results), kind=mode)
+    except Exception:
+        pass
     if not results:
         return await safe_edit(
             status,
@@ -160,7 +166,9 @@ async def _show_results(msg, skey: str, page: int):
     for i, r in enumerate(chunk):
         idx = page * PER_PAGE + i
         tag = "🔞" if r.get("adult") else "🎬"
-        kb.row(Btn(f"{tag} {r['title'][:34]} · {r.get('src_name', '')[:14]}",
+        n = 1 + len(r.get("also_on") or [])
+        where = f"{n} sources" if n > 1 else (r.get("src_name") or "")[:14]
+        kb.row(Btn(f"{tag} {r['title'][:32]} · {where}",
                    f"vpick_{skey}_{idx}", style=PRIMARY))
 
     kb.row(
@@ -175,7 +183,7 @@ async def _show_results(msg, skey: str, page: int):
     card = (
         Card("Video Search", "🎬")
         .field("Query", tcode(query))
-        .field("Results", f"{tcode(len(results))} from {tcode(ok)} sources"
+        .field("Results", f"{tcode(len(results))} unique from {tcode(ok)} sources"
                + (f" · {tcode(failed)} failed" if failed else ""))
         .field("Page", tcode(f"{page + 1}/{pages}"))
         .divider()
@@ -663,6 +671,71 @@ async def vengine_cb(c, q):
         Btn("✕ Close", "close", style=DANGER),
     )
     await safe_edit(q.message, _engine_text(), kb.render())
+
+
+@Client.on_message(filters.command(["vhistory", "recent"]))
+@force_sub
+async def vhistory_cmd(c, m):
+    """Recent searches, one tap to run again."""
+    from services.search_util import history
+
+    entries = history(m.from_user.id)
+    if not entries:
+        return await m.reply(
+            "<b>🕘 Recent searches</b>\n\n"
+            "<blockquote>Nothing yet — try <code>/vsearch frieren</code>.</blockquote>"
+        )
+    import time as _t
+
+    def ago(ts):
+        d = int(_t.time() - ts)
+        if d < 60:
+            return f"{d}s"
+        if d < 3600:
+            return f"{d // 60}m"
+        if d < 86400:
+            return f"{d // 3600}h"
+        return f"{d // 86400}d"
+
+    card = Card("Recent Searches", "🕘").table(
+        ["Query", "Hits", "When"],
+        [[e["query"], e["hits"], ago(e["ts"])] for e in entries],
+        align=["l", "r", "r"],
+    )
+    kb = Keyboard()
+    for e in entries[:6]:
+        kb.row(Btn(f"⌕ {e['query'][:30]}", f"vre_{e['query'][:40]}", style=PRIMARY))
+    kb.row(Btn("🧹 Clear", "vhist_clear", style=DANGER),
+           Btn("✕ Close", "close", style=DANGER))
+    await m.reply(card.build(), reply_markup=kb.render())
+
+
+@Client.on_callback_query(filters.regex(r"^vre_"))
+async def vhistory_repeat(c, q):
+    query = q.data[len("vre_"):]
+    await q.answer(f"Searching {query}…")
+
+    class _M:
+        from_user = q.from_user
+        chat = q.message.chat
+
+        async def reply(self, text, reply_markup=None):
+            return await c.send_message(q.message.chat.id, text,
+                                        reply_markup=reply_markup)
+
+    await _do_search(c, _M(), query, "all")
+
+
+@Client.on_callback_query(filters.regex(r"^vhist_clear$"))
+async def vhistory_clear(c, q):
+    from services.search_util import clear_history
+
+    n = clear_history(q.from_user.id)
+    await q.answer(f"Cleared {n}", show_alert=True)
+    try:
+        await q.message.edit("<blockquote>🕘 Search history cleared.</blockquote>")
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ /audit

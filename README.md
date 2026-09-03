@@ -338,3 +338,44 @@ HTML mode.
 
 Note: in rich HTML a bare newline is insignificant whitespace, so logical
 breaks must be explicit `<br/>` — the builder handles this.
+
+## Bot API 10.3 reply-markup features
+
+| Feature | Support |
+|---------|---------|
+| `disabled` buttons | native via aiogram; inert no-op callback on MTProto |
+| `style="primary"/"danger"/"success"` | native on both backends |
+| `style="link"` (borderless, 10.3) | Bot API path; falls back to default on MTProto |
+| `copy_text` | native on both |
+| `force_reply` on inline keyboards (10.3) | `Keyboard(force_reply=True)` |
+| `icon_custom_emoji_id` | native on both |
+
+## Download queue
+
+`services/queue.py` was a dict that only grew. Two real bugs:
+**nothing ever set `failed`**, so a crashed download stayed `running`
+forever and held the user's concurrency slot; and finished items were
+never pruned, an unbounded memory leak.
+
+Now:
+
+- Lifecycle `pending → running → done | failed | cancelled`
+- **Retention**: cap + TTL, and active work is never evicted
+- **Stale recovery**: a `running` item with no progress for 30 min is
+  failed automatically (swept every 5 min by the scheduler)
+- **Per-user concurrency** via `reserve()` / `release()`
+- Live `progress` + `eta`, `position()` in queue, `stats()`
+- `/queue` shows a live table with progress, ETA, per-task **Cancel**
+  buttons, a status summary and a collapsible error section
+
+## Search quality
+
+`services/search_util.py`:
+
+- **Relevance scoring** — token overlap + sequence similarity + source
+  trust, replacing the old 4-level bucket sort
+- **Cross-source de-duplication** — the same title from six sites becomes
+  one row labelled "Naruto · 6 sources", inheriting any cover art the
+  winning entry lacked
+- **Search history** — `/vhistory` lists recent queries with hit counts
+  and one-tap repeat

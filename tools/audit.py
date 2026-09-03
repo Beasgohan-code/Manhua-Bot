@@ -237,6 +237,115 @@ def check_resilience() -> None:
               f"({len(mgr.srcs)} manga + {len(vmgr.srcs)} video sources)")
 
 
+def check_queue() -> None:
+    """Queue lifecycle, retention and concurrency guarantees."""
+    head("Download queue")
+    import asyncio
+    import time as _t
+
+    from services.queue import DownloadQueue, RUNNING, DONE, FAILED
+
+    fails = []
+
+    async def run():
+        q = DownloadQueue(max_items=5, terminal_ttl=1, max_per_user=2)
+        a = await q.add(1, "A", "1")
+        b = await q.add(1, "B", "2")
+        if await q.position(a.id) != 1:
+            fails.append("position() wrong for first pending item")
+
+        await q.set_status(a.id, RUNNING)
+        await q.progress(a.id, done=5, total=20)
+        if (await q.get(a.id)).progress != 25.0:
+            fails.append("progress() did not compute percentage")
+
+        await q.set_status(b.id, RUNNING)
+        if await q.reserve(1):
+            fails.append("reserve() ignored the per-user concurrency limit")
+
+        (await q.get(b.id)).updated_at = _t.time() - 99999
+        if await q.fail_stale(older_than=60) != 1:
+            fails.append("fail_stale() did not recover a dead running item")
+        if (await q.get(b.id)).status != FAILED:
+            fails.append("stale item was not marked failed")
+        if not await q.reserve(1):
+            fails.append("concurrency slot not released after stale failure")
+
+        if await q.cancel(a.id, user_id=999):
+            fails.append("cancel() ignored ownership")
+
+        # retention: active work must never be evicted
+        q2 = DownloadQueue(max_items=3, terminal_ttl=99999)
+        act = [await q2.add(1, f"R{i}", "1") for i in range(4)]
+        for it in act:
+            await q2.set_status(it.id, RUNNING)
+        for i in range(30):
+            it = await q2.add(1, f"D{i}", "1")
+            await q2.set_status(it.id, DONE)
+        if sum(1 for i in q2._items.values() if i.status == RUNNING) != 4:
+            fails.append("retention evicted active items")
+        if len(q2._items) > 3 + 4 + 1:
+            fails.append(f"retention cap exceeded: {len(q2._items)} items")
+
+    asyncio.run(run())
+    if fails:
+        problems.extend(fails)
+        print(f"{FAIL} {len(fails)} queue problem(s)")
+        for f in fails:
+            print(f"    {f}")
+    else:
+        print(f"{OK} lifecycle, retention, stale recovery and concurrency all correct")
+
+    # failures must actually be recorded by the download path
+    src = (ROOT / "services" / "dl.py").read_text(encoding="utf-8", errors="ignore")
+    if '"failed"' not in src:
+        problems.append("services/dl.py never marks a queue item failed")
+        print(f"{FAIL} dl.py has no failure path — items would stick on 'running'")
+    else:
+        print(f"{OK} dl.py records failures")
+
+
+def check_search() -> None:
+    """Relevance scoring and cross-source de-duplication."""
+    head("Search quality")
+    from services.search_util import dedupe, score, normalize
+
+    fails = []
+    if not score("naruto", "Naruto") > score("naruto", "Naruto Shippuden"):
+        fails.append("exact title does not outrank a longer partial match")
+    if not score("naruto", "Naruto Shippuden") > score("naruto", "Bleach"):
+        fails.append("related title does not outrank an unrelated one")
+    if normalize("NARUTO -ナルト-") != "naruto ナルト":
+        fails.append("normalize() mishandles accents/punctuation")
+
+    merged = dedupe(
+        [
+            {"title": "Naruto", "src": "comick", "src_name": "Comick"},
+            {"title": "naruto", "src": "batoto", "src_name": "Batoto",
+             "cover": "http://c.jpg"},
+            {"title": "NARUTO", "src": "asura", "src_name": "Asura"},
+            {"title": "Bleach", "src": "x", "src_name": "X"},
+        ],
+        "naruto",
+    )
+    if len(merged) != 2:
+        fails.append(f"dedupe kept {len(merged)} rows, expected 2")
+    else:
+        top = merged[0]
+        if top["dupe_count"] != 3:
+            fails.append("dedupe lost duplicate source attribution")
+        if not top.get("cover"):
+            fails.append("dedupe did not inherit a cover from a duplicate")
+
+    if fails:
+        problems.extend(fails)
+        print(f"{FAIL} {len(fails)} search problem(s)")
+        for f in fails:
+            print(f"    {f}")
+    else:
+        print(f"{OK} scoring ranks correctly; dedupe merges across sources")
+
+
 def check_handlers() -> None:
     head("Handler collisions")
     cmds = defaultdict(list)
@@ -512,7 +621,8 @@ def check_engine() -> None:
 def main() -> int:
     print("\033[1mManhua-Bot health audit\033[0m")
     for fn in (check_compile, check_plugins, check_sources, check_video_sources,
-               check_resilience, check_handlers, check_ui, check_rich,
+               check_resilience, check_queue, check_search, check_handlers,
+               check_ui, check_rich,
                check_escaping, check_engine):
         try:
             fn()
