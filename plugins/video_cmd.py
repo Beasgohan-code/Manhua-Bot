@@ -1,62 +1,82 @@
 # Manhua-Bot - anime / hentai video commands
 #
-#   /anime  <name>   search SFW anime sources
-#   /hentai <name>   search adult sources (requires /adult on)
-#   /vsearch <name>  search everything the user is allowed to see
-#   /vdl <source> <id|url> [ep|start-end]
-#   /vsources        list loaded video sites
+# UI/engine adapted from the reference bots:
+#   * KunalG932/auto-manga-chapter-update-bot — "search ALL sources" flow,
+#     paginated result cards, cached session ids
+#   * zenin-373/Hstream-TG — live progress cards, subtitle remux
+#   * MatrixRobots/Hanime-Downloader — quality picker, rich status panels
+#
+#   /anime  <name>    search SFW anime sources
+#   /hentai <name>    search adult sources (requires /adult on)
+#   /vsearch <name>   search everything the user is allowed to see
+#   /vdl <src> <id> [ep|a-b]
+#   /vsources         video site list
+#   /vengine          engine + hanime-plugin diagnostics
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+import time
+from pathlib import Path
 
 from pyrogram import Client, filters
+from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup as KM, InlineKeyboardButton as KB
 
 from plugins.adult_cmd import user_allows_adult
 from plugins.fsub import force_sub
+from services.mem import mem
 from services.vmgr import vmgr
-from services.video_dl import HAS_YTDLP, download_and_send_video, vget
-from utils.ui import RichMessage, code
+from services import vengine
+from services.hplugin import plugin_status, status_line
+from services.video_dl import download_and_send_video, vget
 
 log = logging.getLogger(__name__)
 
-# in-memory result cache: token -> payload (search results / series)
-_cache: dict = {}
-_seq = [0]
+PER_PAGE = 8
+EPS_PER_PAGE = 30
+SESSION_MIN = 60
 
 
-def _put(payload) -> str:
-    _seq[0] += 1
-    token = f"v{_seq[0]}"
-    _cache[token] = payload
-    if len(_cache) > 400:  # cheap bound
-        for old in list(_cache)[:100]:
-            _cache.pop(old, None)
-    return token
+def _key(prefix: str, uid: int) -> str:
+    return f"{prefix}_{uid}_{int(time.time() * 1000) % 10_000_000}"
 
 
-def parse_eps(token: str):
-    token = (token or "").strip()
-    m = re.match(r"^(\d+)\s*-\s*(\d+)$", token)
-    if m:
-        a, b = int(m.group(1)), int(m.group(2))
-        if a > b:
-            a, b = b, a
-        return [str(i) for i in range(a, b + 1)]
-    return [token] if token else []
+async def safe_edit(msg, text, reply_markup=None):
+    try:
+        await msg.edit(text, reply_markup=reply_markup)
+    except MessageNotModified:
+        pass
+    except Exception as exc:
+        log.debug(f"[VUI] edit failed: {exc}")
 
 
-def _no_ytdlp_msg() -> str:
-    return (
-        "<b>⚠️ yt-dlp is missing</b>\n\n"
-        "<blockquote>Video download needs yt-dlp (and ffmpeg for merging "
-        "and metadata).\n\n"
-        "<code>pip install -r requirements.txt</code>\n"
-        "<code>apt install ffmpeg</code></blockquote>"
-    )
+def split_cb(data: str, prefix: str, tail: int = 1):
+    """Split callback data whose session key itself contains underscores.
+
+    Layout is `<prefix>_<skey>_<arg...>`; skey is `name_uid_ts`, so we peel
+    the fixed number of trailing args off the end instead of splitting
+    left-to-right (which would slice the key apart).
+    """
+    body = data[len(prefix):]
+    parts = body.rsplit("_", tail)
+    return parts[0], *parts[1:]
+
+
+def rule(char: str = "━", n: int = 26) -> str:
+    return char * n
+
+
+def _engine_warn() -> str:
+    st = vengine.engine_status()
+    bits = []
+    if not st["yt_dlp"]:
+        bits.append("yt-dlp missing")
+    if not st["ffmpeg"]:
+        bits.append("ffmpeg missing")
+    return f"\n⚠️ <i>{' · '.join(bits)}</i>" if bits else ""
 
 
 # ------------------------------------------------------------------ search
@@ -66,39 +86,106 @@ async def _do_search(c, m, query: str, mode: str):
 
     if mode == "adult" and not allow_adult:
         return await m.reply(
-            "🔞 Adult sources are locked. Enable them with <code>/adult on</code> first."
+            "🔞 <b>Adult sources locked</b>\n\n"
+            "<blockquote>Enable them first with <code>/adult on</code>.</blockquote>"
         )
 
-    status = await m.reply(f"<blockquote>⌕ Searching <code>{query}</code>…</blockquote>")
-    results = await vmgr.search(query, allow_adult=(mode != "sfw" and allow_adult))
+    use_adult = allow_adult and mode != "sfw"
+    total = len(vmgr.names(use_adult))
 
+    status = await m.reply(
+        f"<b>⌕ Searching</b>\n{rule()}\n"
+        f"Query: <code>{query}</code>\n"
+        f"Sources: <code>0/{total}</code>\n"
+        f"{vengine.progress_bar(0)}\n"
+        f"Found: <code>0</code>"
+    )
+
+    last = [0.0]
+
+    async def on_progress(st):
+        now = time.time()
+        if now - last[0] < 1.5 and st["done"] < st["total"]:
+            return
+        last[0] = now
+        pct = 100.0 * st["done"] / max(1, st["total"])
+        await safe_edit(
+            status,
+            f"<b>⌕ Searching</b>\n{rule()}\n"
+            f"Query: <code>{query}</code>\n"
+            f"Sources: <code>{st['done']}/{st['total']}</code>\n"
+            f"{vengine.progress_bar(pct)} {pct:.0f}%\n"
+            f"Found: <code>{st['found']}</code>",
+        )
+
+    results = await vmgr.search(query, allow_adult=use_adult, on_progress=on_progress)
     if mode == "sfw":
         results = [r for r in results if not r.get("adult")]
     elif mode == "adult":
         results = [r for r in results if r.get("adult")]
 
+    stats = getattr(vmgr, "last_stats", {}) or {}
     if not results:
-        return await status.edit(
-            f"<blockquote>⚠ No results for <code>{query}</code></blockquote>"
+        return await safe_edit(
+            status,
+            f"<b>✗ No results</b>\n{rule()}\n"
+            f"Nothing found for <code>{query}</code>.\n"
+            f"<blockquote>Searched <code>{stats.get('total', 0)}</code> sources · "
+            f"<code>{len(stats.get('failed', []))}</code> unreachable.</blockquote>"
+            f"{_engine_warn()}",
         )
 
-    results = results[:40]
-    token = _put(results)
+    skey = _key("vres", uid)
+    mem.set(skey, {"results": results[:80], "query": query, "stats": stats}, minutes=SESSION_MIN)
+    await _show_results(status, skey, 0)
+
+
+async def _show_results(msg, skey: str, page: int):
+    data = mem.get(skey)
+    if not data:
+        return await safe_edit(msg, "<blockquote>Session expired — search again.</blockquote>")
+
+    results = data["results"]
+    query, stats = data["query"], data.get("stats", {})
+    pages = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = results[page * PER_PAGE : (page + 1) * PER_PAGE]
 
     rows = []
-    for i, r in enumerate(results[:20]):
-        tag = "🔞 " if r.get("adult") else ""
-        label = f"{tag}{r['title'][:32]} · {r.get('src_name', '')[:12]}"
-        rows.append([KB(label, f"vpick_{token}_{i}")])
+    for i, r in enumerate(chunk):
+        idx = page * PER_PAGE + i
+        tag = "🔞" if r.get("adult") else "🎬"
+        rows.append(
+            [KB(f"{tag} {r['title'][:34]} · {r.get('src_name', '')[:14]}", f"vpick_{skey}_{idx}")]
+        )
+
+    nav = []
+    if page > 0:
+        nav.append(KB("◂ Prev", f"vpg_{skey}_{page - 1}"))
+    nav.append(KB(f"{page + 1}/{pages}", "noop"))
+    if page < pages - 1:
+        nav.append(KB("Next ▸", f"vpg_{skey}_{page + 1}"))
+    rows.append(nav)
     rows.append([KB("✕ Close", "close")])
 
-    text = (
-        RichMessage("Video Search", "🎬")
-        .kv([("Query", code(query)), ("Results", code(len(results)))])
-        .tip("Pick a title to list its episodes.")
-        .build()
+    ok = len(stats.get("ok", []))
+    failed = len(stats.get("failed", []))
+    await safe_edit(
+        msg,
+        f"<b>🎬 Video Search</b>\n{rule()}\n"
+        f"Query: <code>{query}</code>\n"
+        f"Results: <code>{len(results)}</code> from <code>{ok}</code> sources"
+        + (f" · <code>{failed}</code> failed" if failed else "")
+        + f"\n{rule()}\n<i>Pick a title to list episodes.</i>",
+        KM(rows),
     )
-    await status.edit(text, reply_markup=KM(rows))
+
+
+@Client.on_callback_query(filters.regex(r"^vpg_"))
+async def vpg(c, q):
+    skey, page = split_cb(q.data, "vpg_")
+    await q.answer()
+    await _show_results(q.message, skey, int(page))
 
 
 @Client.on_message(filters.command(["anime", "asearch"]))
@@ -130,9 +217,9 @@ async def hentai_cmd(c, m):
 async def vsearch_cmd(c, m):
     if len(m.command) < 2:
         return await m.reply(
-            "<b>🎬 Video search</b>\n\n<blockquote>"
-            "<code>/vsearch &lt;name&gt;</code> — all allowed sources\n"
-            "<code>/anime</code> — SFW only · <code>/hentai</code> — adult only"
+            "<b>🎬 Video search — all sources</b>\n\n<blockquote>"
+            "<code>/vsearch &lt;name&gt;</code>\n"
+            "<code>/anime</code> SFW only · <code>/hentai</code> adult only"
             "</blockquote>"
         )
     await _do_search(c, m, " ".join(m.command[1:]), "all")
@@ -141,91 +228,162 @@ async def vsearch_cmd(c, m):
 # ---------------------------------------------------------------- episodes
 @Client.on_callback_query(filters.regex(r"^vpick_"))
 async def vpick(c, q):
-    _, token, idx = q.data.split("_", 2)
-    results = _cache.get(token)
-    if not results:
-        return await q.answer("Results expired — search again.", show_alert=True)
-    item = results[int(idx)]
+    skey, idx = split_cb(q.data, "vpick_")
+    data = mem.get(skey)
+    if not data:
+        return await q.answer("Session expired — search again.", show_alert=True)
+    item = data["results"][int(idx)]
 
-    await q.answer("Loading episodes…")
-    try:
-        await q.message.edit(
-            f"<blockquote>⋯ Loading <b>{item['title'][:60]}</b></blockquote>"
-        )
-    except Exception:
-        pass
+    await q.answer("Loading…")
+    await safe_edit(q.message, f"<blockquote>⋯ Loading <b>{item['title'][:60]}</b></blockquote>")
 
     series = await vmgr.get_series(item["src"], item.get("id") or item.get("url"))
     if not series:
-        return await q.message.edit("<blockquote>⚠ Could not load that title.</blockquote>")
-
+        return await safe_edit(
+            q.message,
+            "<b>⚠ Could not load</b>\n<blockquote>The source did not return "
+            "episode data. Try another result.</blockquote>",
+        )
     series.setdefault("title", item["title"])
-    episodes = series.get("episodes") or []
-    if not episodes:
-        return await q.message.edit("<blockquote>⚠ No episodes found.</blockquote>")
+    if not series.get("episodes"):
+        return await safe_edit(q.message, "<blockquote>⚠ No episodes found.</blockquote>")
 
-    stoken = _put(series)
+    ekey = _key("vser", q.from_user.id)
+    mem.set(ekey, series, minutes=SESSION_MIN)
+    await _show_episodes(q.message, ekey, 0, q.from_user.id)
+
+
+async def _show_episodes(msg, ekey: str, page: int, uid: int):
+    series = mem.get(ekey)
+    if not series:
+        return await safe_edit(msg, "<blockquote>Session expired — search again.</blockquote>")
+
+    eps = series.get("episodes") or []
+    pages = max(1, (len(eps) + EPS_PER_PAGE - 1) // EPS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = eps[page * EPS_PER_PAGE : (page + 1) * EPS_PER_PAGE]
+
     rows, row = [], []
-    for i, ep in enumerate(episodes[:60]):
-        row.append(KB(ep.get("num") or str(i + 1), f"vep_{stoken}_{i}"))
+    for i, ep in enumerate(chunk):
+        idx = page * EPS_PER_PAGE + i
+        row.append(KB(str(ep.get("num") or idx + 1), f"vep_{ekey}_{idx}"))
         if len(row) == 5:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([KB("⬇️ All episodes", f"vall_{stoken}"), KB("✕ Close", "close")])
 
-    text = (
-        RichMessage(series["title"][:60], "🎬")
-        .kv(
-            [
-                ("Source", code(series.get("src_name") or series.get("src"))),
-                ("Episodes", code(len(episodes))),
-                ("Quality", code(await vget(q.from_user.id, "v_quality"))),
-            ]
-        )
-        .tip("Tap an episode number to download. Configure output in /usettings.")
-        .build()
+    nav = []
+    if page > 0:
+        nav.append(KB("◂", f"vep_pg_{ekey}_{page - 1}"))
+    nav.append(KB(f"{page + 1}/{pages}", "noop"))
+    if page < pages - 1:
+        nav.append(KB("▸", f"vep_pg_{ekey}_{page + 1}"))
+    if len(nav) > 1:
+        rows.append(nav)
+
+    rows.append(
+        [KB("⚙ Quality", f"vq_{ekey}"), KB("⬇️ Batch (25)", f"vall_{ekey}")]
     )
-    await q.message.edit(text, reply_markup=KM(rows))
+    rows.append([KB("✕ Close", "close")])
+
+    quality = await vget(uid, "v_quality")
+    mode = await vget(uid, "v_upload")
+    await safe_edit(
+        msg,
+        f"<b>🎬 {series['title'][:60]}</b>\n{rule()}\n"
+        f"Source: <code>{series.get('src_name') or series.get('src')}</code>\n"
+        f"Episodes: <code>{len(eps)}</code>\n"
+        f"Quality: <code>{vengine.quality_label(quality)}</code>\n"
+        f"Upload as: <code>{mode}</code>\n{rule()}\n"
+        f"<i>Tap an episode number to download.</i>{_engine_warn()}",
+        KM(rows),
+    )
 
 
+@Client.on_callback_query(filters.regex(r"^vep_pg_"))
+async def vep_pg(c, q):
+    ekey, page = split_cb(q.data, "vep_pg_")
+    await q.answer()
+    await _show_episodes(q.message, ekey, int(page), q.from_user.id)
+
+
+@Client.on_callback_query(filters.regex(r"^vq_"))
+async def vq_menu(c, q):
+    ekey = q.data[len("vq_"):]
+    curr = await vget(q.from_user.id, "v_quality")
+    rows = [
+        [
+            KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vqs_{ekey}_{x}")
+            for x in ("480", "720")
+        ],
+        [
+            KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vqs_{ekey}_{x}")
+            for x in ("1080", "best")
+        ],
+        [KB("◂ Back", f"vep_pg_{ekey}_0")],
+    ]
+    await safe_edit(
+        q.message,
+        f"<b>⚙ Download quality</b>\n{rule()}\n"
+        "<blockquote>Applies to all your downloads. The engine falls back "
+        "to the next best stream when a height is unavailable.</blockquote>",
+        KM(rows),
+    )
+
+
+@Client.on_callback_query(filters.regex(r"^vqs_"))
+async def vq_set(c, q):
+    ekey, val = split_cb(q.data, "vqs_")
+    from services.video_dl import vset
+
+    await vset(q.from_user.id, "v_quality", val)
+    await q.answer(f"Quality: {val}")
+    await _show_episodes(q.message, ekey, 0, q.from_user.id)
+
+
+# --------------------------------------------------------------- downloads
 async def _run_downloads(c, chat_id, uid, series, episodes, status):
     ok = fail = 0
+    total = len(episodes)
     for i, ep in enumerate(episodes, 1):
+        head = (
+            f"<b>⬇️ {series['title'][:40]}</b>\n{rule()}\n"
+            f"Episode <code>{ep.get('num')}</code> · <code>{i}/{total}</code>\n"
+        )
         try:
-            await status.edit(
-                f"<blockquote>⬇️ {i}/{len(episodes)} — "
-                f"Episode <code>{ep.get('num')}</code></blockquote>"
+            await safe_edit(status, head + "<i>resolving stream…</i>")
+            await download_and_send_video(
+                c, chat_id, uid, series, ep, status_msg=status, head=head
             )
-            await download_and_send_video(c, chat_id, uid, series, ep, status_msg=status)
             ok += 1
         except Exception as exc:
             log.error(f"[VDL] {series.get('title')} E{ep.get('num')}: {exc}")
             fail += 1
             await c.send_message(
                 chat_id,
-                f"⚠ Episode <code>{ep.get('num')}</code> failed — {str(exc)[:120]}",
+                f"⚠ Episode <code>{ep.get('num')}</code> failed\n"
+                f"<blockquote>{str(exc)[:200]}</blockquote>",
             )
-    try:
-        await status.edit(
-            f"<b>Done</b> — ok <code>{ok}</code> · failed <code>{fail}</code>"
-        )
-    except Exception:
-        pass
+    await safe_edit(
+        status,
+        f"<b>✅ Finished</b>\n{rule()}\n"
+        f"{series['title'][:50]}\n"
+        f"Done: <code>{ok}</code> · Failed: <code>{fail}</code>",
+    )
 
 
-@Client.on_callback_query(filters.regex(r"^vep_"))
+@Client.on_callback_query(filters.regex(r"^vep_(?!pg_)"))
 async def vep(c, q):
-    if not HAS_YTDLP:
-        return await q.message.reply(_no_ytdlp_msg())
-    _, token, idx = q.data.split("_", 2)
-    series = _cache.get(token)
+    if not vengine.HAS_YTDLP:
+        return await q.message.reply(_no_engine_msg())
+    ekey, idx = split_cb(q.data, "vep_")
+    series = mem.get(ekey)
     if not series:
-        return await q.answer("Expired — search again.", show_alert=True)
+        return await q.answer("Session expired — search again.", show_alert=True)
     ep = (series.get("episodes") or [])[int(idx)]
     await q.answer("Queued")
-    status = await q.message.reply("<blockquote>⋯ Preparing download…</blockquote>")
+    status = await q.message.reply("<blockquote>⋯ Preparing…</blockquote>")
     asyncio.create_task(
         _run_downloads(c, q.message.chat.id, q.from_user.id, series, [ep], status)
     )
@@ -233,64 +391,79 @@ async def vep(c, q):
 
 @Client.on_callback_query(filters.regex(r"^vall_"))
 async def vall(c, q):
-    if not HAS_YTDLP:
-        return await q.message.reply(_no_ytdlp_msg())
-    series = _cache.get(q.data.split("_", 1)[1])
+    if not vengine.HAS_YTDLP:
+        return await q.message.reply(_no_engine_msg())
+    ekey = q.data[len("vall_"):]
+    series = mem.get(ekey)
     if not series:
-        return await q.answer("Expired — search again.", show_alert=True)
-    episodes = (series.get("episodes") or [])[:25]
-    await q.answer(f"Queued {len(episodes)} episodes")
+        return await q.answer("Session expired — search again.", show_alert=True)
+    eps = (series.get("episodes") or [])[:25]
+    await q.answer(f"Queued {len(eps)}")
     status = await q.message.reply(
-        f"<blockquote>⋯ Queued <code>{len(episodes)}</code> episodes…</blockquote>"
+        f"<blockquote>⋯ Queued <code>{len(eps)}</code> episodes…</blockquote>"
     )
     asyncio.create_task(
-        _run_downloads(c, q.message.chat.id, q.from_user.id, series, episodes, status)
+        _run_downloads(c, q.message.chat.id, q.from_user.id, series, eps, status)
     )
 
 
-# --------------------------------------------------------------------- /vdl
+def _no_engine_msg() -> str:
+    return (
+        "<b>⚠️ Download engine unavailable</b>\n\n"
+        "<blockquote>yt-dlp is required.\n\n"
+        "<code>pip install -r requirements.txt</code>\n"
+        "<code>apt install ffmpeg aria2</code></blockquote>"
+    )
+
+
+def parse_eps(token: str):
+    token = (token or "").strip()
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", token)
+    if m:
+        a, b = sorted((int(m.group(1)), int(m.group(2))))
+        return [str(i) for i in range(a, b + 1)]
+    return [token] if token else []
+
+
 @Client.on_message(filters.command(["vdl", "vdownload"]))
 @force_sub
 async def vdl_cmd(c, m):
-    if not HAS_YTDLP:
-        return await m.reply(_no_ytdlp_msg())
+    if not vengine.HAS_YTDLP:
+        return await m.reply(_no_engine_msg())
     args = m.command[1:]
     if len(args) < 2:
         return await m.reply(
-            "<b>⬇️ Video download</b>\n\n<blockquote>"
-            "<code>/vdl &lt;source&gt; &lt;id_or_url&gt; [ep|start-end]</code>\n\n"
+            "<b>⬇️ Direct video download</b>\n\n<blockquote>"
+            "<code>/vdl &lt;source&gt; &lt;id_or_url&gt; [ep|a-b]</code>\n\n"
             "<code>/vdl hanime some-slug</code>\n"
-            "<code>/vdl pahe &lt;session&gt; 1-5</code>\n"
-            "</blockquote>See <code>/vsources</code> for names."
+            "<code>/vdl pahe &lt;session&gt; 1-5</code>"
+            "</blockquote>See <code>/vsources</code>."
         )
 
     uid = m.from_user.id
     src = vmgr.get(args[0])
     if not src:
-        return await m.reply(f"<blockquote>⚠ Unknown source: <code>{args[0]}</code></blockquote>")
+        return await m.reply(f"<blockquote>⚠ Unknown source <code>{args[0]}</code></blockquote>")
     if src.adult and not await user_allows_adult(uid):
-        return await m.reply("🔞 Adult source — enable with <code>/adult on</code> first.")
+        return await m.reply("🔞 Adult source — enable with <code>/adult on</code>.")
 
     status = await m.reply(f"<blockquote>⋯ Loading <code>{src.name}</code>…</blockquote>")
     series = await vmgr.get_series(vmgr.key_of(src), args[1])
     if not series:
-        return await status.edit("<blockquote>⚠ Title not found.</blockquote>")
+        return await safe_edit(status, "<blockquote>⚠ Title not found.</blockquote>")
 
-    episodes = series.get("episodes") or []
+    eps = series.get("episodes") or []
     if len(args) > 2:
         wanted = set(parse_eps(args[2]))
-        picked = [e for e in episodes if str(e.get("num")) in wanted]
-        episodes = picked or episodes[:1]
+        eps = [e for e in eps if str(e.get("num")) in wanted] or eps[:1]
     else:
-        episodes = episodes[:1]
-
-    if not episodes:
-        return await status.edit("<blockquote>⚠ No matching episodes.</blockquote>")
-
-    await _run_downloads(c, m.chat.id, uid, series, episodes[:25], status)
+        eps = eps[:1]
+    if not eps:
+        return await safe_edit(status, "<blockquote>⚠ No matching episodes.</blockquote>")
+    await _run_downloads(c, m.chat.id, uid, series, eps[:25], status)
 
 
-# ---------------------------------------------------------------- /vsources
+# ------------------------------------------------------------- diagnostics
 @Client.on_message(filters.command(["vsources", "vsites"]))
 @force_sub
 async def vsources_cmd(c, m):
@@ -298,18 +471,50 @@ async def vsources_cmd(c, m):
     sfw = [s for s in vmgr.srcs.values() if not s.adult]
     adult = [s for s in vmgr.srcs.values() if s.adult]
 
-    body = "<b>Anime</b>\n" + "\n".join(
+    body = f"<b>🎬 Anime ({len(sfw)})</b>\n" + "\n".join(
         f"• {s.name} — <code>{s.sf}</code>" for s in sfw
     )
     if allow:
-        body += "\n\n<b>🔞 Hentai</b>\n" + "\n".join(
+        body += f"\n\n<b>🔞 Hentai ({len(adult)})</b>\n" + "\n".join(
             f"• {s.name} — <code>{s.sf}</code>" for s in adult
         )
     else:
         body += f"\n\n🔞 <i>{len(adult)} adult sources hidden — /adult on</i>"
 
     await m.reply(
-        "<b>🎬 Video Sources</b>\n\n<blockquote>" + body + "</blockquote>\n\n"
-        "<i>Use /vsearch, /anime, /hentai or /vdl &lt;source&gt; …</i>",
-        reply_markup=KM([[KB("✕ Close", "close")]]),
+        f"<b>Video Sources</b>\n{rule()}\n<blockquote>{body}</blockquote>\n"
+        f"<i>/vsearch · /anime · /hentai · /vdl</i>",
+        reply_markup=KM([[KB("⚙ Engine", "vengine_cb"), KB("✕ Close", "close")]]),
     )
+
+
+def _engine_text() -> str:
+    st = vengine.engine_status()
+
+    def mark(v):
+        return "✅" if v else "❌"
+
+    return (
+        f"<b>⚙ Download Engine</b>\n{rule()}\n"
+        "<blockquote>"
+        f"{mark(st['yt_dlp'])} yt-dlp — extraction\n"
+        f"{mark(st['ffmpeg'])} ffmpeg — merge / metadata / remux\n"
+        f"{mark(st['aria2c'])} aria2c — accelerated segments"
+        "</blockquote>\n"
+        f"<b>hanime-plugin</b>\n<blockquote>{status_line()}</blockquote>\n"
+        + ("" if st["ffmpeg"] else
+           "\n<i>Without ffmpeg: no 1080p merge, no MKV subtitles.</i>\n"
+           "<code>apt install ffmpeg aria2</code>")
+    )
+
+
+@Client.on_message(filters.command(["vengine", "vstatus"]))
+@force_sub
+async def vengine_cmd(c, m):
+    await m.reply(_engine_text(), reply_markup=KM([[KB("✕ Close", "close")]]))
+
+
+@Client.on_callback_query(filters.regex(r"^vengine_cb$"))
+async def vengine_cb(c, q):
+    await q.answer()
+    await safe_edit(q.message, _engine_text(), KM([[KB("✕ Close", "close")]]))

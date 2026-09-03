@@ -43,6 +43,7 @@ async def _panel_text(uid: int) -> str:
     m_author = await vget(uid, "v_meta_author")
     caption = await vget(uid, "v_caption")
     split = await vget(uid, "v_split")
+    subs = await vget(uid, "v_subs")
     ftype = await db.get_cfg(uid, "ftype", "pdf")
 
     warn = "" if has_ffmpeg() else "\n<i>⚠️ ffmpeg not found — metadata/thumb limited</i>"
@@ -55,7 +56,8 @@ async def _panel_text(uid: int) -> str:
         f"Upload as: <code>{'Document' if mode == 'document' else 'Video'}</code>\n"
         f"Quality: <code>{quality if quality == 'best' else quality + 'p'}</code>\n"
         f"Thumbnail: {_set(thumb)}\n"
-        f"Auto-split &gt;2GB: {_s(split)}"
+        f"Auto-split &gt;2GB: {_s(split)}\n"
+        f"Subtitles (eng): {_s(subs)}"
         "</blockquote>\n\n"
         "<blockquote>"
         "<b>▸ Metadata</b>\n"
@@ -72,7 +74,7 @@ async def _panel_text(uid: int) -> str:
     )
 
 
-def _panel_kb(mode: str, thumb, split) -> KM:
+def _panel_kb(mode: str, thumb, split, subs) -> KM:
     return KM(
         [
             [
@@ -83,6 +85,10 @@ def _panel_kb(mode: str, thumb, split) -> KM:
             [
                 KB(f"🖼 Thumbnail {_set(thumb)}", "vs_thumb"),
                 KB(f"✂️ Split {_s(split)}", "vs_split"),
+            ],
+            [
+                KB(f"💬 Subtitles {_s(subs)}", "vs_subs"),
+                KB("⚙ Engine", "vengine_cb"),
             ],
             [KB("▸ Manga file type", "vs_ftype"), KB("↻ Reset", "vs_reset")],
             [KB("✕ Close", "close")],
@@ -96,6 +102,7 @@ async def show_panel(target, uid: int, edit: bool = False):
         await vget(uid, "v_upload"),
         await vget(uid, "v_thumb"),
         await vget(uid, "v_split"),
+        await vget(uid, "v_subs"),
     )
     if edit and hasattr(target, "message"):
         try:
@@ -142,15 +149,29 @@ async def vs_split(c, q):
     await show_panel(q, uid, edit=True)
 
 
+@Client.on_callback_query(filters.regex(r"^vs_subs$"))
+async def vs_subs(c, q):
+    uid = q.from_user.id
+    curr = await vget(uid, "v_subs")
+    await vset(uid, "v_subs", not curr)
+    await q.answer(
+        "Subtitles on — English .ass is muxed into MKV when found"
+        if not curr else "Subtitles off",
+        show_alert=not curr,
+    )
+    await show_panel(q, uid, edit=True)
+
+
 @Client.on_callback_query(filters.regex(r"^vs_qmenu$"))
 async def vs_qmenu(c, q):
     uid = q.from_user.id
     curr = await vget(uid, "v_quality")
+    from services import vengine
     rows = [
-        [
-            KB(f"{'● ' if curr == x else ''}{x if x == 'best' else x + 'p'}", f"vs_q_{x}")
-            for x in QUALITIES
-        ],
+        [KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vs_q_{x}")
+         for x in QUALITIES[:2]],
+        [KB(f"{'● ' if curr == x else ''}{vengine.quality_label(x)}", f"vs_q_{x}")
+         for x in QUALITIES[2:]],
         [KB("◂ Back", "vs_back")],
     ]
     await q.message.edit(

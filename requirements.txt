@@ -16,3 +16,6 @@ httpx
 lxml
 orjson
 yt-dlp
+# video engine
+hanime-plugin
+pycryptodomex

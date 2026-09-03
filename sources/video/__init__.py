@@ -11,6 +11,8 @@ from sources.video.hentai import (
     MyHentaiMovieWebs,
     OnlyHentaiStuffWebs,
     WatchHentaiWebs,
+    HStreamWebs,
+    OppaiStreamWebs,
 )
 
 from sources.video.anime import (
@@ -36,6 +38,8 @@ VIDEO_SOURCES = [
     MyHentaiMovieWebs,
     OnlyHentaiStuffWebs,
     WatchHentaiWebs,
+    HStreamWebs,
+    OppaiStreamWebs,
 ]
 
 __all__ = ["VideoScraper", "VIDEO_SOURCES"] + [c.__name__ for c in VIDEO_SOURCES]

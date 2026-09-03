@@ -204,21 +204,37 @@ async def apply_metadata(path: str, title: str, author: str) -> str:
     return path
 
 
-async def gen_thumb(path: str, dest: Path) -> Optional[str]:
-    """Grab a frame at ~10% for the Telegram thumbnail."""
+async def gen_thumb(path: str, dest: Path, duration: Optional[float] = None) -> Optional[str]:
+    """Grab a representative frame for the Telegram thumbnail."""
     if not has_ffmpeg():
         return None
     out = dest / (Path(path).stem + ".thumb.jpg")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-loglevel", "error", "-ss", "20", "-i", path,
-            "-vframes", "1", "-vf", "scale=320:-1", str(out),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        await proc.communicate()
-        return str(out) if out.exists() else None
-    except Exception:
-        return None
+
+    async def _grab(seek: Optional[float]) -> bool:
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+        if seek and seek > 0:
+            cmd += ["-ss", f"{seek:.2f}"]
+        cmd += ["-i", path, "-vframes", "1", "-vf", "scale=320:-1", str(out)]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            await proc.communicate()
+            return out.exists() and out.stat().st_size > 0
+        except Exception:
+            return False
+
+    # Seek to ~10% so we skip black intros, but never past the end of a
+    # short clip — a fixed seek silently produces no frame on short videos.
+    seek = None
+    if duration and duration > 2:
+        seek = min(max(duration * 0.1, 1.0), max(duration - 1.0, 1.0))
+
+    if await _grab(seek):
+        return str(out)
+    if await _grab(None):  # fall back to the very first frame
+        return str(out)
+    return None
 
 
 async def user_thumb(uid: int, dest: Path) -> Optional[str]:
@@ -286,7 +302,7 @@ async def send_video(
 
     path = await apply_metadata(path, meta_title, meta_author)
 
-    thumb = await user_thumb(uid, tmp) or await gen_thumb(path, tmp)
+    thumb = await user_thumb(uid, tmp) or await gen_thumb(path, tmp, duration=file_info.get("duration"))
 
     size = os.path.getsize(path)
     duration = int(file_info.get("duration") or 0)
@@ -363,53 +379,82 @@ async def download_and_send_video(
     series: Dict[str, Any],
     episode: Dict[str, Any],
     status_msg=None,
+    head: str = "",
 ):
-    """End-to-end: resolve → download → metadata → upload."""
+    """End-to-end: resolve -> download -> subtitles -> metadata -> upload.
+
+    Uses services.vengine (format fallback ladder, aria2c acceleration,
+    .ass subtitle discovery + MKV remux) rather than a single yt-dlp call.
+    """
+    from services import vengine
+    from services.vmgr import vmgr
+
     quality = await vget(uid, "v_quality")
+    want_subs = await vget(uid, "v_subs")
     title = series.get("title") or "Video"
     ep_num = episode.get("num") or episode.get("id") or "1"
     page_url = episode.get("url") or series.get("url")
 
-    from services.vmgr import vmgr
-
     src_obj = vmgr.get(series.get("src") or "")
-    headers = getattr(src_obj, "headers", {}) if src_obj else {}
+    headers = dict(getattr(src_obj, "headers", {}) or {}) if src_obj else {}
 
     resolved = await vmgr.get_episode(series.get("src") or "", page_url) if src_obj else None
+    target = page_url
     if resolved:
-        page_url = resolved.get("stream_url") or resolved.get("page_url") or page_url
+        target = resolved.get("stream_url") or resolved.get("page_url") or page_url
         headers = resolved.get("headers") or headers
 
-    tmp = VIDEO_DIR / str(uid) / str(int(time.time()))
-    name = f"{sanitize(title)[:60]} - E{ep_num}"
+    tmp = VIDEO_DIR / str(uid) / str(int(time.time() * 1000) % 10_000_000)
+    tmp.mkdir(parents=True, exist_ok=True)
 
     last = [0.0]
 
-    def progress(done, total, speed, eta):
+    async def on_progress(p):
+        if not status_msg:
+            return
         now = time.time()
-        if now - last[0] < 6 or not status_msg:
+        if p.get("status") == "downloading" and now - last[0] < 5:
             return
         last[0] = now
-        pct = (done / total * 100) if total else 0
-        bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-        text = (
-            f"<b>⬇️ Downloading</b>\n<blockquote>"
-            f"{title} — E{ep_num}\n"
-            f"<code>{bar}</code> {pct:.1f}%\n"
-            f"{fmt_size(done)} / {fmt_size(total) if total else '?'} · "
-            f"{fmt_size(speed)}/s · ETA {int(eta or 0)}s"
-            f"</blockquote>"
+        if p.get("status") == "finished":
+            return await _safe_edit(status_msg, head + "<i>download complete, processing…</i>")
+        bar = vengine.progress_bar(p.get("pct", 0))
+        await _safe_edit(
+            status_msg,
+            head
+            + f"{bar} <b>{p.get('pct', 0):.1f}%</b>\n"
+            + f"<code>{vengine.human_bytes(p.get('done', 0))}</code> / "
+            + f"<code>{vengine.human_bytes(p.get('total', 0)) if p.get('total') else '?'}</code>\n"
+            + f"⚡ {vengine.human_bytes(p.get('speed', 0))}/s · "
+            + f"ETA <code>{int(p.get('eta') or 0)}s</code>",
         )
-        asyncio.get_event_loop().create_task(_safe_edit(status_msg, text))
 
-    info = await download_video(
-        page_url, tmp, name, quality=quality, headers=headers, progress_cb=progress
+    result = await vengine.download(
+        target, tmp, quality=quality, headers=headers, on_progress=on_progress
     )
-    if not info or not info.get("path") or not os.path.exists(info["path"]):
+    path = vengine.fix_extension(result.path)
+    # Raw TS/FLV cannot be streamed by Telegram clients — normalise it.
+    path = await vengine.to_mp4(path)
+    subtitled = False
+
+    # Subtitle discovery + soft-mux (hstream-style sources)
+    wants = want_subs or bool((resolved or {}).get("subtitles"))
+    if wants and vengine.has_bin("ffmpeg"):
+        await _safe_edit(status_msg, head + "<i>looking for subtitles…</i>")
+        sub = await vengine.fetch_subtitle(page_url, tmp / "eng.ass", headers)
+        if sub:
+            mkv = path.with_suffix(".mkv")
+            muxed = await vengine.remux_with_subs(path, sub, mkv)
+            if muxed:
+                if path != muxed:
+                    path.unlink(missing_ok=True)
+                path = muxed
+                subtitled = True
+
+    if not path.exists():
         raise RuntimeError("Download produced no file")
 
-    if status_msg:
-        await _safe_edit(status_msg, "<blockquote>📤 Uploading to Telegram…</blockquote>")
+    await _safe_edit(status_msg, head + "<i>uploading to Telegram…</i>")
 
     ctx = {
         "title": title,
@@ -418,6 +463,13 @@ async def download_and_send_video(
         "source": series.get("src_name") or series.get("src") or "",
         "quality": quality,
     }
+    info = {
+        "path": str(path),
+        "duration": result.duration,
+        "width": result.width,
+        "height": result.height,
+        "subtitled": subtitled,
+    }
     try:
         return await send_video(client, chat_id, uid, info, ctx, status_msg)
     finally:
@@ -425,6 +477,8 @@ async def download_and_send_video(
 
 
 async def _safe_edit(msg, text):
+    if not msg:
+        return
     try:
         await msg.edit(text)
     except Exception:

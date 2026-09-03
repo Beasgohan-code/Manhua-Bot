@@ -175,12 +175,13 @@ HELP_TEXT = (
         "/dl &lt;src&gt; &lt;id&gt; [10-15] — direct / range DL",
     )
     .section(
-        "Anime &amp; Video",
+        "Anime & Video",
         "/anime &lt;name&gt; — search anime sources\n"
         "/hentai &lt;name&gt; — adult video search (/adult on)\n"
         "/vsearch &lt;name&gt; — all video sources\n"
         "/vdl &lt;src&gt; &lt;id&gt; [1-5] — direct episode DL\n"
-        "/vsources — video site list",
+        "/vsources — video site list\n"
+        "/vengine — engine &amp; plugin status",
     )
     .section(
         "Library",
@@ -198,7 +199,7 @@ HELP_TEXT = (
         "Settings file types: PDF · CBZ · Links",
     )
     .section(
-        "Safety &amp; status",
+        "Safety & status",
         "/adult on|off — NSFW gate\n"
         "/stats — health dashboard\n"
         "/help — this menu",

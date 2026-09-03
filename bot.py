@@ -87,6 +87,16 @@ async def main():
         await start_listener()
         log.info("Channel listener ready")
 
+        # Report video engine + hanime-plugin availability at boot so a
+        # missing ffmpeg/extractor shows up in logs, not mid-download.
+        try:
+            from services.hplugin import log_status
+            from services import vengine
+            log_status()
+            log.info(f"[VENGINE] {vengine.engine_status()}")
+        except Exception as e:
+            log.warning(f"[VENGINE] status check failed: {e}")
+
         from plugins.check.scheduler import check_job
         from services.backup import create_db_backup
 

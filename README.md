@@ -144,3 +144,53 @@ File type **Links** still available in settings (image URL list instead of PDF).
 - Premium: `/add` `/del` `/premium_users` `/del_expired`
 - `/help` — full command list
 # Manhua-Bot
+
+## Anime / Hentai video downloader
+
+Video support alongside manga, with a shared adult gate (`/adult on`).
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/anime <name>` | Search SFW anime sources |
+| `/hentai <name>` | Search adult sources (needs `/adult on`) |
+| `/vsearch <name>` | Search **all** allowed video sources at once |
+| `/vdl <src> <id> [1-5]` | Direct / range episode download |
+| `/vsources` | Video site list |
+| `/vengine` | Engine + hanime-plugin diagnostics |
+| `/usettings` | Your upload settings (video/document, thumbnail, metadata) |
+
+### Video sources
+
+**Anime:** AllAnime · AnimePahe · GogoAnime · AnimeKai
+
+**Adult:** HAnime.tv · Hentai City · Hentai Ocean · Hentai.sh · Hentaverse ·
+My Hentai Movie · OnlyHentaiStuff · WatchHentai · HStream.moe · Oppai.stream
+
+### Engine
+
+Logic adapted from [Hstream-TG](https://github.com/zenin-373/Hstream-TG),
+[Hanime-Downloader](https://github.com/MatrixRobots/Hanime-Downloader) and the
+[auto-manga-chapter-update-bot](https://github.com/KunalG932/auto-manga-chapter-update-bot)
+search architecture:
+
+- **Format fallback ladder** — never fails because one format string missed
+- **aria2c** external downloader (16 connections) when installed
+- **hanime-plugin** yt-dlp extractor pack: HAnime.tv, HStream, Oppai.stream,
+  HentaiHaven, HentaiMama, Hanime.red, OHentai
+- **Subtitle support** — English `.ass` discovery + soft-mux into MKV
+- **Container sniffing** — magic-byte detection so raw TS is never uploaded
+  mislabelled as `.mp4`
+- **Live progress** — search shows `sources 7/14` with a bar; downloads show
+  percent, size, speed and ETA
+- **Parallel "search all sources"** with per-source timeout isolation
+
+### Extra system dependencies
+
+```bash
+apt install ffmpeg aria2      # ffmpeg required for merge/metadata/subtitles
+pip install -r requirements.txt
+```
+
+Run `/vengine` in the bot to confirm what is active.
