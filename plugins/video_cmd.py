@@ -354,6 +354,28 @@ async def vq_set(c, q):
 
 # --------------------------------------------------------------- downloads
 async def _run_downloads(c, chat_id, uid, series, episodes, status):
+    """Download episodes, reporting progress.
+
+    In groups the status is delivered as an ephemeral message so only the
+    requesting user sees the progress spam; elsewhere it is a normal edit.
+    """
+    from utils.progress import ProgressMessage
+
+    prog = None
+    if chat_id < 0:  # group/supergroup
+        try:
+            prog = ProgressMessage(c, chat_id, uid, ephemeral=True)
+            if not await prog._try_ephemeral("<i>Starting…</i>"):
+                prog = None
+        except Exception:
+            prog = None
+
+    async def report(text):
+        if prog is not None:
+            await prog.update(text, force=True)
+        else:
+            await safe_edit(status, text)
+
     ok = fail = 0
     total = len(episodes)
     for i, ep in enumerate(episodes, 1):
@@ -362,7 +384,7 @@ async def _run_downloads(c, chat_id, uid, series, episodes, status):
             f"Episode <code>{ep.get('num')}</code> · <code>{i}/{total}</code>\n"
         )
         try:
-            await safe_edit(status, head + "<i>resolving stream…</i>")
+            await report(head + "<i>resolving stream…</i>")
             await download_and_send_video(
                 c, chat_id, uid, series, ep, status_msg=status, head=head
             )
@@ -375,12 +397,18 @@ async def _run_downloads(c, chat_id, uid, series, episodes, status):
                 f"⚠ Episode <code>{ep.get('num')}</code> failed\n"
                 f"<blockquote>{str(exc)[:200]}</blockquote>",
             )
-    await safe_edit(
-        status,
+    summary = (
         f"<b>✅ Finished</b>\n{rule()}\n"
         f"{series['title'][:50]}\n"
-        f"Done: <code>{ok}</code> · Failed: <code>{fail}</code>",
+        f"Done: <code>{ok}</code> · Failed: <code>{fail}</code>"
     )
+    await report(summary)
+    if prog is not None:
+        # The ephemeral card carried the progress; drop the placeholder.
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
 
 @Client.on_callback_query(filters.regex(r"^vep_(?!pg_)"))

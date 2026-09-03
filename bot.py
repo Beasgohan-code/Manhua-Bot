@@ -123,6 +123,27 @@ async def main():
         sched.add_job(storage_cleanup, "interval", minutes=10)
         sched.add_job(memory_cleanup, "interval", minutes=5)
         sched.add_job(create_db_backup, "interval", hours=24, args=[app])
+        # Restore unfinished downloads that a previous run left behind.
+        try:
+            from services.queue import dl_queue
+
+            n = await dl_queue.restore()
+            if n:
+                log.info(f"[QUEUE] {n} task(s) restored from the database")
+        except Exception as e:
+            log.warning(f"[QUEUE] restore skipped: {e}")
+
+        async def prune_dlqueue():
+            """Keep the persisted queue table bounded."""
+            try:
+                from database.db import db
+
+                n = await db.dlq_prune(older_than_hours=24)
+                if n:
+                    log.info(f"[QUEUE] pruned {n} finished row(s)")
+            except Exception as e:
+                log.debug(f"[QUEUE] prune failed: {e}")
+
         async def sweep_stale_queue():
             """Recover downloads killed by a crash/restart (see services/queue)."""
             try:
@@ -135,6 +156,7 @@ async def main():
                 log.debug(f"[QUEUE] sweep failed: {e}")
 
         sched.add_job(sweep_stale_queue, "interval", minutes=5)
+        sched.add_job(prune_dlqueue, "interval", hours=6)
         sched.add_job(process_persistent_tasks, "interval", minutes=1)
         sched.start()
         log.info("Scheduler started (check: 5m, cache: 10m, storage: 10m, memory: 5m, backup: 24h)")

@@ -421,3 +421,58 @@ it not to raise. That distinction found three real crashes:
 - `Manhuaplus` — `pop("name")` on entries lacking it; `urljoin()` with a
   non-string cover
 - `AllAnime` — GraphQL `data` can be a list, not a dict
+
+## Live selector verification
+
+The offline harnesses cannot tell you a site redesigned its HTML. Run this
+on a machine with real network access:
+
+```bash
+python tools/live_check.py                  # all manga sources
+python tools/live_check.py --video --deep   # + video, + chapters/pages
+python tools/live_check.py -s comick batoto # just these
+python tools/live_check.py --json out.json  # machine-readable report
+```
+
+Each source is classified:
+
+| Status | Meaning |
+|--------|---------|
+| `OK` | returned usable results |
+| `EMPTY` | reachable, zero results — **likely selector drift** |
+| `BROKEN` | raised an exception — a real bug |
+| `TIMEOUT` | no response in time |
+| `BLOCKED` | DNS/TLS/connection refused — environment, not the scraper |
+
+Exit code is non-zero only for `BROKEN`, so a firewalled CI box does not
+produce false alarms. Good as a weekly cron to catch drift early.
+
+## Persistent queue
+
+The queue is in memory for speed and mirrored to PostgreSQL (`dlqueue`
+table) so a restart does not lose work:
+
+- Unfinished items are **restored at boot**
+- Anything left `running` by a crash is **requeued as pending** — the user
+  asked for it and nothing delivered it — unless it has already burned its
+  retry budget (3 attempts), at which point it is failed
+- Writes are fire-and-forget; if the database is down the bot keeps working
+  on the in-memory queue alone
+- Finished rows are pruned every 6 hours
+
+## Ephemeral progress
+
+`utils/progress.ProgressMessage` picks the best channel automatically:
+
+- **group + Bot API reachable** → ephemeral message, visible only to the
+  requesting user, so downloads no longer spam the whole chat
+- **private chat, or no Bot API** → ordinary Kurigram message
+
+Updates are throttled and identical text is never re-sent.
+
+## Per-source fixtures
+
+`tools/fixtures.py` holds fixtures built from individual scrapers' own
+selectors, so "extracted nothing" becomes a real signal rather than an
+ambiguous fixture mismatch. A source with a dedicated fixture that yields
+nothing **fails the audit**.

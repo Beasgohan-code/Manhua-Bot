@@ -74,6 +74,27 @@ class BaseDB:
                     PRIMARY KEY (uid, key)
                 );
 
+                CREATE TABLE IF NOT EXISTS dlqueue (
+                    id TEXT PRIMARY KEY,
+                    uid BIGINT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    chapter TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    source TEXT DEFAULT '',
+                    kind TEXT DEFAULT 'manga',
+                    progress REAL DEFAULT 0,
+                    total INTEGER DEFAULT 0,
+                    done_count INTEGER DEFAULT 0,
+                    attempts INTEGER DEFAULT 0,
+                    error TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    started_at TIMESTAMPTZ,
+                    finished_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_dlq_uid ON dlqueue(uid);
+                CREATE INDEX IF NOT EXISTS idx_dlq_status ON dlqueue(status);
+
                 CREATE TABLE IF NOT EXISTS tasks (
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,

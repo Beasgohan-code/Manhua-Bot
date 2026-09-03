@@ -15,11 +15,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 # Lifecycle
 PENDING = "pending"
@@ -86,6 +89,7 @@ class DownloadQueue:
         max_items: int = MAX_ITEMS,
         terminal_ttl: int = TERMINAL_TTL,
         max_per_user: int = MAX_PER_USER,
+        persist: bool = True,
     ):
         self._items: Dict[str, QueueItem] = {}
         self._order: Deque[str] = deque()
@@ -93,10 +97,89 @@ class DownloadQueue:
         self.max_items = max_items
         self.terminal_ttl = terminal_ttl
         self.max_per_user = max_per_user
+        self.persist = persist
 
     # ------------------------------------------------------------- internals
     def _new_id(self) -> str:
         return uuid.uuid4().hex[:8]
+
+    def _persist(self, item: "QueueItem") -> None:
+        """Mirror an item to Postgres without blocking the caller.
+
+        Fire-and-forget: queue history is not worth failing a download over,
+        and the in-memory queue stays authoritative.
+        """
+        if not self.persist:
+            return
+        try:
+            from database.db import db
+
+            if getattr(db, "pool", None) is None:
+                return
+            asyncio.create_task(self._persist_task(db, item))
+        except Exception:
+            pass
+
+    async def _persist_task(self, db, item) -> None:
+        try:
+            await db.dlq_upsert(item)
+        except Exception as exc:
+            log.debug(f"[QUEUE] persist failed: {exc}")
+
+    async def restore(self) -> int:
+        """Reload unfinished items after a restart.
+
+        Anything left "running" when the process died is marked failed —
+        it cannot still be in flight, and leaving it would permanently
+        consume the owner's concurrency slot.
+        """
+        if not self.persist:
+            return 0
+        try:
+            from database.db import db
+
+            if getattr(db, "pool", None) is None:
+                return 0
+            await db.dlq_mark_orphans()
+            rows = await db.dlq_load_active()
+        except Exception as exc:
+            log.warning(f"[QUEUE] restore failed: {exc}")
+            return 0
+
+        restored = 0
+        async with self._lock:
+            for r in rows:
+                qid = r.get("id")
+                if not qid or qid in self._items:
+                    continue
+                status = r.get("status") or PENDING
+                if status == RUNNING:
+                    status = PENDING  # requeue: it is definitely not running
+                item = QueueItem(
+                    id=qid,
+                    user_id=int(r.get("uid") or 0),
+                    title=r.get("title") or "",
+                    chapter=r.get("chapter") or "",
+                    status=status,
+                    source=r.get("source") or "",
+                    kind=r.get("kind") or "manga",
+                    progress=float(r.get("progress") or 0),
+                    total=int(r.get("total") or 0),
+                    done_count=int(r.get("done_count") or 0),
+                    attempts=int(r.get("attempts") or 0),
+                    error=r.get("error"),
+                    created_at=float(r.get("created_at") or time.time()),
+                    updated_at=float(r.get("updated_at") or time.time()),
+                )
+                item.started_at = (
+                    float(r["started_at"]) if r.get("started_at") else None
+                )
+                self._items[qid] = item
+                self._order.append(qid)
+                restored += 1
+        if restored:
+            log.info(f"[QUEUE] restored {restored} unfinished task(s) from database")
+        return restored
 
     def _prune(self) -> int:
         """Drop expired terminal items, then trim to the cap. Caller holds lock."""
@@ -150,7 +233,8 @@ class DownloadQueue:
             )
             self._items[item.id] = item
             self._order.append(item.id)
-            return item
+        self._persist(item)
+        return item
 
     async def get(self, qid: str) -> Optional[QueueItem]:
         async with self._lock:
@@ -174,7 +258,8 @@ class DownloadQueue:
                     it.progress = 100.0
             if error:
                 it.error = str(error)[:300]
-            return it
+        self._persist(it)
+        return it
 
     async def progress(
         self, qid: str, done: int = 0, total: int = 0, pct: Optional[float] = None
@@ -203,7 +288,8 @@ class DownloadQueue:
                 return False
             it.status = CANCELLED
             it.finished_at = it.updated_at = time.time()
-            return True
+        self._persist(it)
+        return True
 
     # -------------------------------------------------------------- querying
     async def user_items(self, user_id: int, active_only: bool = False

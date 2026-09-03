@@ -277,11 +277,18 @@ def check_extraction() -> None:
         problems.append("extraction harness produced no summary")
         print(f"{FAIL} could not read extraction summary")
         return
+    dedicated_bug = "DEDICATED fixture still returned nothing" in out
     if errs:
         problems.append(f"{errs} source(s) raise on well-formed input")
         print(f"{FAIL} {errs} source(s) crash on realistic input")
         for l in out.splitlines():
             if ": " in l and ("Error" in l or "error" in l):
+                print(f"    {l.strip()}")
+    elif dedicated_bug:
+        problems.append("a source with a dedicated fixture extracted nothing")
+        print(f"{FAIL} dedicated-fixture source extracted nothing (selector bug)")
+        for l in out.splitlines():
+            if "DEDICATED" in l or l.strip().startswith("\033[91m✗\033[0m "):
                 print(f"    {l.strip()}")
     else:
         print(f"{OK} no source raises on well-formed input (parsed {parsed})")
@@ -353,6 +360,131 @@ def check_queue() -> None:
         print(f"{FAIL} dl.py has no failure path — items would stick on 'running'")
     else:
         print(f"{OK} dl.py records failures")
+
+
+def check_persistence() -> None:
+    """Queue persistence: survives restarts, and a dead DB is non-fatal."""
+    head("Queue persistence")
+    import asyncio
+    import sys as _sys
+    import types
+
+    from services.queue import DownloadQueue, RUNNING
+
+    fails = []
+
+    class FakeDB:
+        pool = object()
+
+        def __init__(self):
+            self.rows = {}
+
+        async def dlq_upsert(self, it):
+            self.rows[it.id] = dict(
+                id=it.id, uid=it.user_id, title=it.title, chapter=it.chapter,
+                status=it.status, source=it.source, kind=it.kind,
+                progress=it.progress, total=it.total, done_count=it.done_count,
+                attempts=it.attempts, error=it.error,
+                created_at=it.created_at, started_at=it.started_at,
+                finished_at=it.finished_at, updated_at=it.updated_at,
+            )
+            return True
+
+        async def dlq_mark_orphans(self, max_attempts=3):
+            n = 0
+            for r in self.rows.values():
+                if r["status"] == RUNNING:
+                    if r["attempts"] >= max_attempts:
+                        r["status"] = "failed"
+                    else:
+                        r["status"] = "pending"
+                        n += 1
+            return n
+
+        async def dlq_load_active(self):
+            return [r for r in self.rows.values()
+                    if r["status"] in ("pending", "running")]
+
+    class DeadDB:
+        pool = object()
+
+        async def dlq_upsert(self, it):
+            raise RuntimeError("db down")
+
+        async def dlq_mark_orphans(self, max_attempts=3):
+            raise RuntimeError("db down")
+
+        async def dlq_load_active(self):
+            raise RuntimeError("db down")
+
+    saved = _sys.modules.get("database.db")
+    mod = types.ModuleType("database.db")
+    fake = FakeDB()
+    mod.db = fake
+    _sys.modules["database.db"] = mod
+
+    async def run():
+        q = DownloadQueue()
+        a = await q.add(1, "Persisted", "1", source="s")
+        await q.set_status(a.id, RUNNING)
+        await asyncio.sleep(0.05)
+        if a.id not in fake.rows:
+            fails.append("item was not written to the database")
+
+        q2 = DownloadQueue()
+        n = await q2.restore()
+        if n != 1:
+            fails.append(f"restore() recovered {n} items, expected 1")
+        it = (await q2.user_items(1))[0] if await q2.user_items(1) else None
+        if it is None:
+            fails.append("restored item missing")
+        elif it.status != "pending":
+            fails.append(f"interrupted item restored as {it.status}, expected pending")
+        if any(i.status == RUNNING for i in q2._items.values()):
+            fails.append("a 'running' item survived a restart")
+
+        # exhausted retries are written off
+        fake.rows[a.id]["status"] = RUNNING
+        fake.rows[a.id]["attempts"] = 5
+        q3 = DownloadQueue()
+        if await q3.restore() != 0:
+            fails.append("item past its retry budget was requeued anyway")
+
+        # a dead database must not break the queue
+        mod.db = DeadDB()
+        q4 = DownloadQueue()
+        b = await q4.add(2, "Offline", "1")
+        await asyncio.sleep(0.05)
+        if (await q4.get(b.id)) is None:
+            fails.append("queue broke when the database was unavailable")
+        if await q4.restore() != 0:
+            fails.append("restore() did not degrade safely")
+
+    try:
+        asyncio.run(run())
+    finally:
+        if saved is not None:
+            _sys.modules["database.db"] = saved
+        else:
+            _sys.modules.pop("database.db", None)
+
+    if fails:
+        problems.extend(fails)
+        print(f"{FAIL} {len(fails)} persistence problem(s)")
+        for f in fails:
+            print(f"    {f}")
+    else:
+        print(f"{OK} survives restart, requeues interrupted work, "
+              "degrades safely without a database")
+
+    # progress helper
+    try:
+        from utils.progress import ProgressMessage  # noqa: F401
+
+        print(f"{OK} ephemeral progress helper importable")
+    except Exception as exc:
+        problems.append(f"utils.progress import failed: {exc}")
+        print(f"{FAIL} utils.progress: {exc}")
 
 
 def check_search() -> None:
@@ -740,7 +872,8 @@ def check_engine() -> None:
 def main() -> int:
     print("\033[1mManhua-Bot health audit\033[0m")
     for fn in (check_compile, check_plugins, check_sources, check_video_sources,
-               check_resilience, check_extraction, check_queue, check_search,
+               check_resilience, check_extraction, check_queue,
+               check_persistence, check_search,
                check_handlers,
                check_ui, check_rich, check_transport,
                check_escaping, check_engine):

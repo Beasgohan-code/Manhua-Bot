@@ -140,19 +140,20 @@ def api_json() -> dict:
 
 
 class Fixture:
-    """Serves a plausible response for whatever the scraper asks for."""
+    """Serves a plausible response, preferring a per-source fixture."""
 
     def __init__(self):
         self.calls = 0
+        self.current = ""   # scraper class currently under test
 
     def body(self, url: str, rjson):
         self.calls += 1
-        if rjson:
-            return api_json()
-        u = str(url).lower()
-        if any(k in u for k in ("search", "?s=", "query", "ajax", "browse", "filter")):
-            return wp_manga_html() + generic_cards_html()
-        return wp_manga_html() + generic_cards_html()
+        try:
+            from tools.fixtures import html_for, json_for
+
+            return json_for(self.current) if rjson else html_for(self.current)
+        except Exception:
+            return api_json() if rjson else (wp_manga_html() + generic_cards_html())
 
 
 async def main() -> int:
@@ -175,10 +176,17 @@ async def main() -> int:
     # WeebCentral bypasses Scraper.post and calls cloudscraper directly.
     class FakeResp:
         status_code = 200
-        text = wp_manga_html() + generic_cards_html()
+
+        @property
+        def text(self):
+            from tools.fixtures import html_for
+
+            return html_for(fx.current)
 
         def json(self):
-            return api_json()
+            from tools.fixtures import json_for
+
+            return json_for(fx.current)
 
     for src in list(mgr.srcs.values()) + list(vmgr.srcs.values()):
         sc = getattr(src, "scraper", None)
@@ -190,8 +198,9 @@ async def main() -> int:
 
     extracted, empty, errored = [], [], []
     for name, src in sorted(mgr.srcs.items()):
+        fx.current = name
         try:
-            res = await asyncio.wait_for(src.search("test manga"), timeout=15)
+            res = await asyncio.wait_for(src.search("one piece"), timeout=15)
         except Exception as exc:
             errored.append((name, f"{type(exc).__name__}: {exc}"[:70]))
             continue
@@ -213,6 +222,14 @@ async def main() -> int:
     if verbose:
         for n, t, c in extracted:
             print(f"    {OK} {n:24} {c:3} results, first={t!r}")
+    from tools.fixtures import FIXTURES
+
+    dedicated = [n for n in empty if n in FIXTURES]
+    if dedicated:
+        print(f"{FAIL} {len(dedicated)} source(s) with a DEDICATED fixture still "
+              f"returned nothing (real selector bug):")
+        for n in dedicated:
+            print(f"    {FAIL} {n}")
     if empty:
         print(f"{WARN} {len(empty)} returned nothing (selectors differ from fixture):")
         for n in empty[:40]:
@@ -239,7 +256,9 @@ async def main() -> int:
     print(f"  parsed OK : {len(extracted)}/{total}")
     print(f"  no match  : {len(empty)}  (fixture shape mismatch, not proof of breakage)")
     print(f"  errors    : {len(errored) + len(v_err)}  <- these are real bugs")
-    return 1 if (errored or v_err) else 0
+    # A source with a purpose-built fixture that still yields nothing is a
+    # genuine bug, not a fixture mismatch.
+    return 1 if (errored or v_err or dedicated) else 0
 
 
 if __name__ == "__main__":
