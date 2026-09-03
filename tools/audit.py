@@ -350,6 +350,94 @@ def check_ui() -> None:
         print(f"{OK} all rendered buttons carry an action")
 
 
+def check_rich() -> None:
+    """Validate native Rich Message HTML (Bot API 10.1+) grammar."""
+    head("Rich messages (Bot API 10.x)")
+    from utils.richmsg import RichDoc, rich_available, codespan, i as _i
+
+    RICH_OK = {
+        "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "span",
+        "tg-spoiler", "a", "tg-emoji", "code", "pre", "blockquote", "cite",
+        "aside", "details", "summary", "table", "caption", "tr", "th", "td",
+        "ul", "ol", "li", "input", "p", "h1", "h2", "h3", "h4", "h5", "h6",
+        "hr", "footer", "mark", "sub", "sup", "tg-math", "tg-math-block",
+        "tg-time", "br", "figure",
+    }
+    VOID = {"hr", "br", "input"}
+
+    doc = (
+        RichDoc()
+        .heading("Report", 1, "📊")
+        .field_row("Source", codespan("allanime"))
+        .table(["Ep", "Q"], [[1, "1080p"]], align=["r", "c"], caption="Batch")
+        .bullets(["one", "two"])
+        .numbered(["a"], start=3)
+        .checklist([("done", True), ("todo", False)])
+        .quote("<p>q</p>", credit="CEO", expandable=True)
+        .pull_quote("<p>p</p>", "Author")
+        .details("Log", "<p>ok</p>")
+        .code_block("x=1", "python")
+        .progress(50, "up")
+        .divider()
+        .footer(_i("bot"))
+    )
+    variants = {
+        "full doc": doc.html(),
+        "empty doc": RichDoc().html(),
+        "empty table": RichDoc().table([], []).html(),
+        "empty lists": RichDoc().bullets([]).numbered([]).checklist([]).html(),
+        "level clamp": RichDoc().heading("t", 99).html(),
+        "injection": RichDoc().heading("<script>alert(1)</script>", 1)
+        .table(["<x>"], [["<img onerror=1>"]]).html(),
+    }
+    bad = []
+    for label, html in variants.items():
+        tags = {t.lower() for t in re.findall(r"</?([A-Za-z0-9-]+)", html)}
+        for t in tags - RICH_OK:
+            bad.append(f"{label}: illegal <{t}>")
+        stack = []
+        for m in re.finditer(r"<(/?)([A-Za-z0-9-]+)([^>]*)>", html):
+            close, tag, attrs = m.group(1), m.group(2).lower(), m.group(3)
+            if tag in VOID or attrs.rstrip().endswith("/"):
+                continue
+            if close:
+                if not stack or stack.pop() != tag:
+                    bad.append(f"{label}: unbalanced </{tag}>")
+            else:
+                stack.append(tag)
+        if stack:
+            bad.append(f"{label}: unclosed {stack}")
+    if "<script>" in variants["injection"]:
+        bad.append("injection: raw <script> survived escaping")
+
+    if bad:
+        problems.extend(bad)
+        print(f"{FAIL} {len(bad)} rich-HTML problem(s)")
+        for x in bad[:10]:
+            print(f"    {x}")
+    else:
+        print(f"{OK} rich HTML valid across {len(variants)} variants "
+              "(tags, balance, escaping)")
+
+    # the classic fallback must also be legal Telegram HTML
+    fb = doc.fallback()
+    CLASSIC = {
+        "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "span",
+        "tg-spoiler", "a", "tg-emoji", "code", "pre", "blockquote",
+    }
+    illegal = {t.lower() for t in re.findall(r"</?([A-Za-z0-9-]+)", fb)} - CLASSIC
+    if illegal:
+        problems.append(f"fallback uses non-classic tags: {sorted(illegal)}")
+        print(f"{FAIL} fallback emits {sorted(illegal)}")
+    else:
+        print(f"{OK} classic fallback uses only legacy-safe tags")
+
+    st = rich_available()
+    print(f"{OK if st['ok'] else WARN} native send: {st['reason']}")
+    if not st["ok"]:
+        warnings_found.append(f"rich messages unavailable: {st['reason']}")
+
+
 def check_escaping() -> None:
     """Catch pre-escaped entities passed into helpers that escape again."""
     head("Double-escaping")
@@ -424,8 +512,8 @@ def check_engine() -> None:
 def main() -> int:
     print("\033[1mManhua-Bot health audit\033[0m")
     for fn in (check_compile, check_plugins, check_sources, check_video_sources,
-               check_resilience, check_handlers, check_ui, check_escaping,
-               check_engine):
+               check_resilience, check_handlers, check_ui, check_rich,
+               check_escaping, check_engine):
         try:
             fn()
         except Exception as e:

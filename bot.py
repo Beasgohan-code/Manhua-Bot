@@ -108,7 +108,16 @@ async def main():
         sched.add_job(process_persistent_tasks, "interval", minutes=1)
         sched.start()
         log.info("Scheduler started (check: 5m, cache: 10m, storage: 10m, memory: 5m, backup: 24h)")
-        await idle()
+        try:
+            await idle()
+        finally:
+            # Release the aiogram HTTP session used for native rich messages.
+            try:
+                from utils.richmsg import close_rich
+
+                await close_rich()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import asyncio

@@ -292,3 +292,49 @@ and `/audit`. Pass `borders=False` for a lightweight variant.
 - duplicate commands, callback-prefix shadowing
 - HTML legality/balance/escaping and double-escape detection
 - engine + hanime-plugin availability
+
+## Native Rich Messages (Bot API 10.1+)
+
+Telegram introduced **Rich Messages** in Bot API 10.1 (June 2026), extended
+through 10.3. These are not the classic five inline tags — they are real
+structural blocks, so tables and headings no longer have to be faked inside
+`<pre>`:
+
+| Rich block | HTML | Classic equivalent |
+|-----------|------|--------------------|
+| Headings | `<h1>`…`<h6>` | bold text |
+| **Real tables** | `<table bordered striped compact>` + `align` + `<caption>` | monospaced box-drawing |
+| Lists / checkboxes | `<ul> <ol> <li> <input type=checkbox>` | `•` / `1.` / `☑` |
+| Collapsible | `<details open><summary>` | expandable blockquote |
+| Quote with credit | `<blockquote expandable><cite>` | blockquote |
+| Pull quote | `<aside>` | italic |
+| Divider / footer | `<hr/>` `<footer>` | `━━━` |
+| Marked / sub / sup | `<mark> <sub> <sup>` | — |
+| LaTeX | `<tg-math> <tg-math-block>` | — |
+| Locale date/time | `<tg-time unix= format=>` | plain text |
+
+`utils/richmsg.py` builds both representations at once:
+
+```python
+from utils.richmsg import RichDoc, send_rich
+
+doc = (RichDoc()
+       .heading("Download Complete", 1, "✅")
+       .table(["Episode", "Quality", "Size"],
+              [[1, "1080p", "412 MB"]],
+              align=["r", "c", "r"], caption="Batch summary")
+       .checklist([("Fetch", True), ("Upload", False)])
+       .details("Engine log", "<p>yt-dlp: ok</p>")
+       .quote("Best quarter ever.", credit="CEO", expandable=True))
+
+await send_rich(chat_id, doc, reply_markup=kb, fallback_client=client)
+```
+
+`send_rich()` uses `sendRichMessage` through aiogram when available and
+silently falls back to `doc.fallback()` — classic HTML with monospaced
+tables — otherwise. Rich-only tags are stripped from the fallback, since
+Telegram rejects a whole message containing `<p>` or `<table>` in normal
+HTML mode.
+
+Note: in rich HTML a bare newline is insignificant whitespace, so logical
+breaks must be explicit `<br/>` — the builder handles this.

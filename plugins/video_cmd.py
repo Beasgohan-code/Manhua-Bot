@@ -36,6 +36,7 @@ from utils.tgui import (
     Btn, Keyboard, Card, table, quote, code as tcode, divider,
     PRIMARY, DANGER, SUCCESS, NOOP_CB,
 )
+from utils.richmsg import RichDoc, send_rich, rich_available, codespan
 
 log = logging.getLogger(__name__)
 
@@ -489,6 +490,55 @@ async def vsources_cmd(c, m):
     await m.reply(card.build(), reply_markup=kb.render())
 
 
+def _engine_doc() -> RichDoc:
+    """Native rich version of the engine panel (falls back automatically)."""
+    from utils.tgui import backend_report
+
+    st = vengine.engine_status()
+    ui = backend_report()
+    ps = plugin_status()
+
+    def mk(v):
+        return "✅" if v else "❌"
+
+    doc = RichDoc().heading("Download Engine", 1, "⚙")
+    doc.table(
+        ["Component", "St", "Purpose"],
+        [
+            ["yt-dlp", mk(st["yt_dlp"]), "extraction"],
+            ["ffmpeg", mk(st["ffmpeg"]), "merge / metadata / subtitles"],
+            ["aria2c", mk(st["aria2c"]), "accelerated segments"],
+        ],
+        align=["l", "c", "l"],
+        caption="Media pipeline",
+    )
+    doc.heading("hanime-plugin", 2)
+    if ps["installed"]:
+        from services.hplugin import PLUGIN_SITES
+
+        doc.bullets([PLUGIN_SITES[n] for n in ps["extractors"]])
+    else:
+        doc.paragraph(f"⚠️ inactive — {ps.get('error')}")
+    doc.table(
+        ["UI Backend", "St", "Detail"],
+        [
+            ["Kurigram", mk(ui["kurigram"]), "MTProto runtime"],
+            ["Button styles", mk(ui["kurigram_styles"]), "primary/danger/success"],
+            ["aiogram", mk(ui["aiogram"]), f"Bot API {ui['aiogram_bot_api']}"],
+            ["Disabled buttons", mk(ui["native_disabled"]), "native"],
+            ["Rich messages", mk(rich_available()["ok"]), rich_available()["reason"]],
+        ],
+        align=["l", "c", "l"],
+    )
+    if not st["ffmpeg"]:
+        doc.details(
+            "⚠️ ffmpeg missing — what breaks",
+            "<p>No 1080p merge, no metadata, no MKV subtitles.</p>"
+            "<pre>apt install ffmpeg aria2</pre>",
+        )
+    return doc
+
+
 def _engine_text() -> str:
     from utils.tgui import backend_report
 
@@ -599,7 +649,10 @@ async def vengine_cmd(c, m):
         Btn("↻ Refresh", "vengine_cb", style=PRIMARY),
         Btn("✕ Close", "close", style=DANGER),
     )
-    await m.reply(_engine_text(), reply_markup=kb.render())
+    doc = _engine_doc()
+    sent = await send_rich(m.chat.id, doc, reply_markup=kb, fallback_client=None)
+    if sent is None:
+        await m.reply(doc.fallback(), reply_markup=kb.render())
 
 
 @Client.on_callback_query(filters.regex(r"^vengine_cb$"))
